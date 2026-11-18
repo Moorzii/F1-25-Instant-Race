@@ -1,0 +1,2319 @@
+// SPDX-License-Identifier: MIT
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <random>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <swofty/db.hpp>
+#include <swofty/events.hpp>
+#include <swofty/live.hpp>
+#include <swofty/mem.hpp>
+#include <swofty/mixin.hpp>
+#include <swofty/overlay.hpp>
+#include <swofty/overlay_ui.hpp>
+#include <swofty/storage.hpp>
+
+SWOFTY_SETTING(std::string_view, menu_key, "F7");
+SWOFTY_SETTING(bool, show_menu_prompt, true);
+
+namespace {
+
+// --- Struct & Flow Offsets (invariant across 1.0.141.7865 & 1.0.145) ---
+constexpr uintptr_t MANAGER_MODES          = 0x0c0;
+constexpr uintptr_t MANAGER_ENTRANTS       = 0x290;
+constexpr uintptr_t ES_LISTS               = 0x560;
+constexpr uintptr_t ENTITY_ENTRANTS        = 0x2e0;
+constexpr uintptr_t ENTRANT_SIZE           = 0x088;
+constexpr uintptr_t ENTITY_LIST            = 0xe18;
+constexpr uintptr_t ENTITY_MODE            = 0xf08;
+constexpr uintptr_t ENTITY_TRACKS          = 0xf58;
+constexpr uintptr_t ENTITY_REGISTRY        = 0x1030;
+
+constexpr size_t WK_SESSIONS               = 0x220;
+constexpr size_t WK_CURRENT                = 0x238;
+constexpr size_t WK_TRACK                  = 0x278;
+constexpr size_t SESSION_ID                = 0x008;
+
+constexpr size_t STATE_HASH                = 0x0b0;
+constexpr size_t STATE_STATUS              = 0x0b8;
+constexpr size_t STATE_CHILDREN            = 0x0c0;
+constexpr size_t STATE_CHILD               = 0xbd8;
+constexpr size_t STATE_PARENT              = 0xc10; // direct_start.cpp:125
+
+void ilog(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    swofty::log("%s", buf);
+
+    static std::mutex log_mtx;
+    static std::FILE *fp = nullptr;
+    std::lock_guard<std::mutex> lk(log_mtx);
+    if (!fp) {
+        char path[MAX_PATH]{};
+        if (GetEnvironmentVariableA("LOCALAPPDATA", path, MAX_PATH)) {
+            std::string dir_path = std::string(path) + "\\swofty";
+            CreateDirectoryA(dir_path.c_str(), nullptr);
+            std::string file_path = dir_path + "\\instant_race.log";
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            bool big = GetFileAttributesExA(file_path.c_str(), GetFileExInfoStandard, &fad) &&
+                       (fad.nFileSizeHigh != 0 || fad.nFileSizeLow > 512u * 1024u);
+            fp = std::fopen(file_path.c_str(), big ? "w" : "a");
+        }
+    }
+    if (fp) {
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        std::fprintf(fp, "%02d:%02d:%02d.%03d %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+        std::fflush(fp);
+    }
+}
+constexpr size_t LOAD_SYNC                 = 0xcd0;
+constexpr size_t FRONTEND_SCENES           = 0xd20;
+constexpr size_t SCENES_MAIN               = 0x040;
+constexpr size_t MAIN_SPAWNED              = 0x1048;
+
+constexpr uint32_t STATE_APP               = 0xe11edb87;
+constexpr uint32_t STATE_FRONTEND_WORLD    = 0x290b11ae;
+constexpr uint32_t STATE_FRONTEND          = 0x957880c6;
+constexpr uint32_t STATE_LOAD_SESSION      = 0x17e3cd0a;
+constexpr uint32_t STATE_SESSION           = 0x1505f42a;
+constexpr uint32_t LINK_STAY               = 0;
+constexpr uint32_t LINK_EXIT               = 0x0eef86be;
+constexpr uint32_t LINK_SESSION            = 0x8c23ce89;
+constexpr uint32_t FADE_FRONTEND           = 1u << 1;
+
+// --- Dynamically Resolved Game Addresses ---
+struct GameAddrs {
+    bool scanned = false;
+    uintptr_t flow_link = 0;
+    uintptr_t game_manager = 0;
+    uintptr_t set_mode = 0;
+    uintptr_t mode_by_predicate = 0;
+    uintptr_t gp_predicate = 0;
+    uintptr_t set_setup_mode = 0;
+    uintptr_t list_stat_id = 0;
+    uintptr_t rounds_clear = 0;
+    uintptr_t add_track = 0;
+    uintptr_t build_season = 0;
+    uintptr_t fill_entrants = 0;
+    uintptr_t weekend_structure = 0;
+    uintptr_t weekend_service = 0;
+    uintptr_t rounds_component = 0;
+    uintptr_t message_bus = 0;
+    uintptr_t post_begin = 0;
+    uintptr_t post_end = 0;
+    uintptr_t vt_msg_begin = 0;
+    uintptr_t vt_msg_end = 0;
+    uintptr_t game_root = 0;
+    uintptr_t despawn_main_scene = 0;
+} g_addrs;
+
+// --- Fast PE Image Pattern Scanner ---
+uintptr_t scan_pattern(const char *pattern) {
+    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
+    if (!base) return 0;
+    auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    std::vector<int> bytes;
+    std::istringstream iss(pattern);
+    std::string tok;
+    while (iss >> tok) {
+        if (tok == "?" || tok == "??") bytes.push_back(-1);
+        else bytes.push_back(static_cast<int>(std::strtol(tok.c_str(), nullptr, 16)));
+    }
+    if (bytes.empty()) return 0;
+
+    const auto *sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned s = 0; s < nt->FileHeader.NumberOfSections; ++s) {
+        if ((sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+        const uint8_t *start = reinterpret_cast<const uint8_t *>(base + sec[s].VirtualAddress);
+        size_t size = sec[s].Misc.VirtualSize;
+        if (size < bytes.size()) continue;
+        size_t limit = size - bytes.size();
+        for (size_t i = 0; i <= limit; ++i) {
+            bool ok = true;
+            for (size_t j = 0; j < bytes.size(); ++j) {
+                if (bytes[j] != -1 && start[i + j] != static_cast<uint8_t>(bytes[j])) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return reinterpret_cast<uintptr_t>(start + i);
+        }
+    }
+    return 0;
+}
+
+uintptr_t resolve_riprel(uintptr_t hit, size_t disp_off, size_t instr_len) {
+    if (!hit) return 0;
+    int32_t disp = *reinterpret_cast<const int32_t *>(hit + disp_off);
+    return hit + instr_len + disp;
+}
+
+// The target of an E8 call at the start of a match: several of the game's functions are found from a call to them.
+uintptr_t resolve_rel32_call(uintptr_t hit) {
+    return resolve_riprel(hit, 1, 5);
+}
+
+// Diagnostic: logs what is really in memory for the functions the signatures could not find, so their addresses on
+// this exact build can be worked out from the log. Runs once per game start (and again at launch, since some code is
+// only decrypted later).
+void diag_find_functions(const char *when) {
+    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
+    if (!base) return;
+    struct Item { const char *name; uintptr_t old_rva; const char *frag; };
+    static const Item items[] = {
+        {"rounds_clear", 0x420cd60, "48 8B 32 48 8B FA 48 8B 4A 08"},
+        {"add_track",    0x0b99450, "48 8B 89 A8 02 00 00"},
+        {"build_season", 0x1207290, "48 8B B9 90 02 00 00"},
+        {"fill_entrants",0x2460230, "45 89 CF 4D 89 C6"},
+        {"list_stat_id", 0x24286e0, "48 85 C9 74 ?? 80 39 00"},
+    };
+    for (const auto &it : items) {
+        uintptr_t at = base + it.old_rva;
+        for (uintptr_t d : {uintptr_t(0), uintptr_t(0x40)}) {
+            const uint8_t *p = reinterpret_cast<const uint8_t *>(at + d);
+            if (!swofty::mem::readable(p, 24)) { ilog("[instant-race] diag(%s) %s +0x%llx: unreadable", when, it.name, (unsigned long long)d); continue; }
+            char hex[24 * 3 + 1]{};
+            for (int i = 0; i < 24; ++i) std::snprintf(hex + i * 3, 4, "%02X ", p[i]);
+            ilog("[instant-race] diag(%s) %s old+0x%llx rva=0x%llx bytes: %s", when, it.name, (unsigned long long)d, (unsigned long long)(it.old_rva + d), hex);
+        }
+        std::vector<int> bytes;
+        std::istringstream iss(it.frag);
+        std::string tok;
+        while (iss >> tok) bytes.push_back(tok == "??" ? -1 : static_cast<int>(std::strtol(tok.c_str(), nullptr, 16)));
+        uintptr_t lo = it.old_rva > 0x40000 ? it.old_rva - 0x40000 : 0, hi = it.old_rva + 0x40000;
+        int hits = 0;
+        for (uintptr_t page = lo & ~uintptr_t(0xfff); page < hi && hits < 6; page += 0x1000) {
+            if (!swofty::mem::readable(reinterpret_cast<const void *>(base + page), 0x1000 + 32)) continue;
+            const uint8_t *s = reinterpret_cast<const uint8_t *>(base + page);
+            for (size_t i = 0; i < 0x1000 && hits < 6; ++i) {
+                bool ok = true;
+                for (size_t j = 0; j < bytes.size(); ++j)
+                    if (bytes[j] != -1 && s[i + j] != static_cast<uint8_t>(bytes[j])) { ok = false; break; }
+                if (ok) { ilog("[instant-race] diag(%s) %s fragment at rva=0x%llx (old rva 0x%llx)", when, it.name, (unsigned long long)(page + i), (unsigned long long)it.old_rva); ++hits; }
+            }
+        }
+        if (!hits) ilog("[instant-race] diag(%s) %s fragment: no hit within +-0x40000 of old rva", when, it.name);
+    }
+}
+
+void resolve_all_game_addrs() {
+    if (g_addrs.scanned) return;
+    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
+    if (!base) return;
+
+    // 1. Flow link check inside Vm_Update_FlowStateMachine (1.0.145 RVA: 0x4424c78 + 0x12)
+    if (!g_addrs.flow_link) {
+        uintptr_t fl = scan_pattern("48 8B 07 48 8D 54 24 40 48 89 F9 C5 F9 28 D6 FF 50 20 8B 44 24 40 39 05");
+        if (!fl && swofty::mem::readable(reinterpret_cast<void *>(base + 0x4424c78), 24)) {
+            const auto *p = reinterpret_cast<const uint8_t *>(base + 0x4424c78);
+            if (p[0] == 0x48 && p[1] == 0x8B && p[2] == 0x07 && p[0x12] == 0x8B && p[0x13] == 0x44) {
+                fl = base + 0x4424c78;
+            }
+        }
+        if (fl) g_addrs.flow_link = fl + 0x12;
+    }
+
+    // 2. Game Manager & Mode lookup functions
+    if (!g_addrs.game_manager) {
+        uintptr_t gm_hit = scan_pattern("48 8B B8 98 01 00 00 48 85 FF 0F 84 ?? ?? ?? ?? 48 8D 4C 24 70 E8 ?? ?? ?? ?? 48 8B 05");
+        g_addrs.game_manager = resolve_riprel(gm_hit, 29, 33);
+    }
+    if (!g_addrs.set_mode) {
+        g_addrs.set_mode = scan_pattern("41 56 56 57 55 53 48 81 EC 80 00 00 00 48 8B 81 88 00 00 00");
+    }
+    if (!g_addrs.gp_predicate || !g_addrs.mode_by_predicate) {
+        uintptr_t pred_hit = scan_pattern("48 8D 05 ?? ?? ?? ?? 48 89 44 24 28 48 8D 54 24 28 E8 ?? ?? ?? ?? 48 85 C0 74 22");
+        if (pred_hit) {
+            g_addrs.gp_predicate = resolve_riprel(pred_hit, 3, 7);
+            g_addrs.mode_by_predicate = resolve_riprel(pred_hit + 17, 1, 5);
+        }
+    }
+
+    // 3. Game Root & Scene Despawn
+    if (!g_addrs.game_root) {
+        uintptr_t root_hit = scan_pattern("48 8B 05 ?? ?? ?? ?? 48 8B 40 60 48 8B 88 D0 09 00 00 FF 15 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 40 60");
+        g_addrs.game_root = resolve_riprel(root_hit, 3, 7);
+    }
+    if (!g_addrs.despawn_main_scene) {
+        g_addrs.despawn_main_scene = scan_pattern("56 57 53 48 83 EC 20 48 89 CE 80 3D ?? ?? ?? ?? 01 75 66 B8 BD 00 00 00");
+    }
+
+    // 4. Grand Prix Weekend Setup Functions
+    if (!g_addrs.set_setup_mode) {
+        uintptr_t setup_hit = scan_pattern("E8 ?? ?? ?? ?? 48 8D 84 24 20 03 00 00 48 C7 84 24 10 03 00 00 80 00 00 00");
+        g_addrs.set_setup_mode = resolve_riprel(setup_hit, 1, 5);
+    }
+    if (!g_addrs.list_stat_id) {
+        g_addrs.list_stat_id = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 41 89 C6 48 8D 4C 24 50 48 8D 15"));
+    }
+    if (!g_addrs.rounds_clear) {
+        g_addrs.rounds_clear = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 48 8B 8E 70 02 00 00 48 8B 01 FF 90 88 00 00 00 48 85 C0 0F 84 ?? ?? ?? ?? 48 89 C3"));
+    }
+    if (!g_addrs.add_track) {
+        g_addrs.add_track = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 48 83 C6 08 48 39 DE 75 EC 48 8B BC 24 70 01 00 00"));
+    }
+    if (!g_addrs.build_season) {
+        g_addrs.build_season = scan_pattern("56 48 83 EC 20 48 89 CE BA 98 02 00 00");
+    }
+    if (!g_addrs.fill_entrants) {
+        g_addrs.fill_entrants = scan_pattern("41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC B8 00 00 00 4D 89 CE 4C 89 C7");
+    }
+    if (!g_addrs.weekend_structure) {
+        g_addrs.weekend_structure = scan_pattern("41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 48 44 89 CD 45 89 C6");
+    }
+    if (!g_addrs.weekend_service) {
+        g_addrs.weekend_service = resolve_riprel(scan_pattern("48 8D 15 ?? ?? ?? ?? 41 B8 01 00 00 00 FF 50 10 48 85 C0 74 4B"), 3, 7);
+    }
+    if (!g_addrs.rounds_component) {
+        g_addrs.rounds_component = resolve_riprel(scan_pattern("48 8D 15 ?? ?? ?? ?? FF 50 10 48 89 83 50 05 00 00"), 3, 7);
+    }
+    if (!g_addrs.message_bus) {
+        g_addrs.message_bus = resolve_riprel(scan_pattern("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 30 48 8B 48 08"), 3, 7);
+    }
+    if (!g_addrs.post_begin) {
+        g_addrs.post_begin = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? C6 86 F8 02 00 00 01 4C 89 F1"));
+    }
+    if (!g_addrs.post_end) {
+        g_addrs.post_end = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? C6 86 F8 02 00 00 00 85 FF"));
+    }
+    if (!g_addrs.vt_msg_begin) {
+        g_addrs.vt_msg_begin = resolve_riprel(scan_pattern("4C 8D 25 ?? ?? ?? ?? 4C 89 64 24 50 48 8B 48 08"), 3, 7);
+    }
+    if (!g_addrs.vt_msg_end) {
+        g_addrs.vt_msg_end = resolve_riprel(scan_pattern("48 8D 0D ?? ?? ?? ?? 48 89 4C 24 38 4C 89 74 24 48"), 3, 7);
+    }
+
+    // Fallback to 1.0.145.2472 RVAs when flow_link matches base + 0x4424c78 + 0x12
+    bool is_145 = (g_addrs.flow_link == base + 0x4424c78 + 0x12);
+    if (is_145) {
+        if (!g_addrs.game_manager)      g_addrs.game_manager      = base + 0x604c2c8;
+        if (!g_addrs.set_mode)          g_addrs.set_mode          = base + 0x07d07a0;
+        if (!g_addrs.mode_by_predicate) g_addrs.mode_by_predicate = base + 0x07d2280;
+        if (!g_addrs.gp_predicate)      g_addrs.gp_predicate      = base + 0x077cff0;
+        if (!g_addrs.set_setup_mode)    g_addrs.set_setup_mode    = base + 0x079f300;
+        if (!g_addrs.list_stat_id)      g_addrs.list_stat_id      = base + 0x24286e0;
+        if (!g_addrs.rounds_clear)      g_addrs.rounds_clear      = base + 0x420cd60;
+        if (!g_addrs.add_track)         g_addrs.add_track         = base + 0x0b99450;
+        if (!g_addrs.build_season)      g_addrs.build_season      = base + 0x1207290;
+        if (!g_addrs.fill_entrants)     g_addrs.fill_entrants     = base + 0x2460230;
+        if (!g_addrs.weekend_structure) g_addrs.weekend_structure = base + 0x0b025f0;
+        if (!g_addrs.weekend_service)   g_addrs.weekend_service   = base + 0x605ada0;
+        if (!g_addrs.rounds_component)  g_addrs.rounds_component  = base + 0x605ad40;
+        if (!g_addrs.message_bus)       g_addrs.message_bus       = base + 0x618b3b8;
+        if (!g_addrs.post_begin)        g_addrs.post_begin        = base + 0x24e2b90;
+        if (!g_addrs.post_end)          g_addrs.post_end          = base + 0x24e2f00;
+        if (!g_addrs.vt_msg_begin)      g_addrs.vt_msg_begin      = base + 0x578d4e8;
+        if (!g_addrs.vt_msg_end)        g_addrs.vt_msg_end        = base + 0x578d510;
+        if (!g_addrs.game_root)         g_addrs.game_root         = base + 0x601db08;
+        if (!g_addrs.despawn_main_scene)g_addrs.despawn_main_scene= base + 0x28d9a90;
+    }
+
+    if (g_addrs.flow_link && g_addrs.game_manager && g_addrs.set_mode && g_addrs.mode_by_predicate && g_addrs.gp_predicate) {
+        g_addrs.scanned = true;
+        ilog("[instant-race] Sig scan OK (is_145=%d): flow=%p mgr=%p set_mode=%p pred=%p setup=%p rounds_clr=%p add_trk=%p bld_ssn=%p fill=%p",
+             is_145 ? 1 : 0, (void *)g_addrs.flow_link, (void *)g_addrs.game_manager,
+             (void *)g_addrs.set_mode, (void *)g_addrs.gp_predicate, (void *)g_addrs.set_setup_mode,
+             (void *)g_addrs.rounds_clear, (void *)g_addrs.add_track,
+             (void *)g_addrs.build_season, (void *)g_addrs.fill_entrants);
+        ilog("[instant-race] more: wk_struct=%p wk_service=%p rounds_comp=%p msg_bus=%p post_begin=%p post_end=%p vt_begin=%p vt_end=%p game_root=%p despawn=%p",
+             (void *)g_addrs.weekend_structure, (void *)g_addrs.weekend_service, (void *)g_addrs.rounds_component,
+             (void *)g_addrs.message_bus, (void *)g_addrs.post_begin, (void *)g_addrs.post_end,
+             (void *)g_addrs.vt_msg_begin, (void *)g_addrs.vt_msg_end, (void *)g_addrs.game_root,
+             (void *)g_addrs.despawn_main_scene);
+        static bool diag_boot = false;
+        if (!diag_boot && !(g_addrs.rounds_clear && g_addrs.add_track && g_addrs.build_season && g_addrs.fill_entrants)) {
+            diag_boot = true;
+            diag_find_functions("boot");
+        }
+    }
+}
+
+enum class LaunchStage : int {
+    idle = 0,
+    set_mode = 1,
+    wait_rounds = 2,
+    leave_frontend = 4,
+    loading_session = 5,
+    done = 6
+};
+
+struct EraInfo {
+    std::string id;
+    std::string label;
+    int64_t row_index = -1;
+};
+
+struct SeatChoice {
+    std::string team_id;
+    std::string team_label;
+    std::string driver_id;
+    std::string driver_label;
+};
+
+struct TrackInfo {
+    std::string id;
+    std::string label;
+};
+
+struct RaceConfig {
+    std::string era_id = "f1_2025";
+    std::string era_label = "F1 25";
+    int64_t era_row_index = -1;
+    std::string team_id = "";
+    std::string team_label = "Random Team";
+    std::string driver_id = "";
+    std::string driver_label = "Random Driver";
+    std::string track_id = "silverstone";
+    std::string track_label = "Silverstone";
+    std::string weather = "Dry";
+    float laps = 5.0f;
+    float ai_difficulty = 85.0f;
+    bool surprise = false; // hide era/car/track/weather and roll them at Start
+};
+
+std::mutex g_mutex;
+RaceConfig g_cfg;
+bool g_menu_open = false;
+bool g_was_focused = false;
+bool g_initialized_roll = false;
+std::atomic<bool> g_in_session{false};
+std::atomic<uint64_t> g_frontend_seen_ms{0};
+swofty::overlay::ui::State g_ui_state;
+
+std::atomic<int> g_stage{static_cast<int>(LaunchStage::idle)};
+uint64_t g_stage_ts = 0;
+uint64_t g_load_exit_ts = 0;
+bool g_load_sync_done = false;
+int g_load_sync_tries = 0;
+std::atomic<bool> g_chose_sess{false};
+std::atomic<int> g_track_stat{-1};
+void choose_race_session();
+bool g_fade_released = false;
+bool g_scene_despawned = false;
+std::atomic<uint8_t *> g_flow_root{nullptr};
+bool g_flow_hook_installed = false;
+bool g_raced_once = false; // known limitation: a second launch in one game session hangs on the menu
+
+std::mt19937 g_rng{static_cast<unsigned>(GetTickCount64())};
+
+using ModeByPredicateFn = uint8_t *(void *modes, void *const *predicate);
+using SetModeFn = void(void *modes, void *mode);
+using BuildSettingsFn = uint64_t(void *mode, uint8_t *settings);
+using WeatherPickFn = int(void *sys, int a2, int a3, int a4);
+
+BuildSettingsFn *orig_build_settings = nullptr;
+WeatherPickFn *orig_weather_pick = nullptr;
+
+template <class T> bool rd(const void *p, size_t off, T &out) {
+    if (!p) return false;
+    const auto *a = static_cast<const uint8_t *>(p) + off;
+    if (!swofty::mem::readable(a, sizeof(T))) return false;
+    std::memcpy(&out, a, sizeof(T));
+    return true;
+}
+
+bool cursor_int(const swofty::db::Cursor *cur, std::string_view field, int64_t &out) {
+    swofty::db::Value v{};
+    if (swofty::db::cell(cur, field, &v) != swofty::db::Result::ok) return false;
+    if (v.tag == SWOFTY_DB_INT || v.tag == SWOFTY_DB_ID || v.tag == SWOFTY_DB_ENUM) {
+        out = v.i;
+        return true;
+    }
+    return false;
+}
+
+std::string prettify_token(std::string s) {
+    if (s.starts_with("sw_")) s = s.substr(3);
+    if (s.starts_with("f1cg_")) s = s.substr(5);
+    if (s.ends_with("_vehicle_package")) s = s.substr(0, s.size() - 16);
+    if (s.ends_with("_gp")) s = s.substr(0, s.size() - 3);
+    for (char &c : s) {
+        if (c == '_') c = ' ';
+    }
+    bool cap = true;
+    for (char &c : s) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            cap = true;
+        } else if (cap) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            cap = false;
+        }
+    }
+    if (s == "Brhgp") return "Brands Hatch GP";
+    if (s == "Imsgp") return "Indianapolis Motor Speedway";
+    if (s == "Lgsgp") return "Laguna Seca";
+    if (s == "Lbcgp") return "Long Beach";
+    if (s == "Lisgp") return "Portimao (Portuguese GP)";
+    if (s == "Mgcgp") return "Magny-Cours (French GP)";
+    if (s == "Bsagp") return "Buenos Aires";
+    if (s == "Gsygp") return "Channel Islands GP";
+    if (s == "Laxgp") return "Los Angeles Street Circuit";
+    if (s == "Nycgp") return "Manhattan Street Circuit";
+    if (s == "Wawgp") return "Warsaw Street Circuit";
+    if (s == "Cncgp") return "Cancun Street Circuit";
+    if (s == "Lemans") return "Circuit de la Sarthe (Le Mans)";
+    return s;
+}
+
+bool classify_era(const std::string &id, std::string &out_label) {
+    if (id == "f1_2025") {
+        out_label = "F1 25";
+        return true;
+    }
+    if (id == "f1_2026") {
+        out_label = "F1 26";
+        return true;
+    }
+    if (id.find("zenith") != std::string::npos || id.find("equal") != std::string::npos ||
+        id.find("career") != std::string::npos || id.find("story") != std::string::npos ||
+        id.find("my_team") != std::string::npos || id.find("ghost") != std::string::npos ||
+        id.find("tutorial") != std::string::npos || id.find("pro") != std::string::npos ||
+        id.find("world") != std::string::npos || id.find("beta") != std::string::npos ||
+        id.find("safety") != std::string::npos || id.find("f2_") != std::string::npos ||
+        id.find("_tr_") != std::string::npos) {
+        return false;
+    }
+    for (int yr = 2013; yr <= 2024; ++yr) {
+        std::string ystr = std::to_string(yr);
+        if (id == "sw_" + ystr || id == "f1_" + ystr || id == "f1cg_f1_" + ystr || id == "swofty_" + ystr) {
+            out_label = ystr + " Swofty";
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<EraInfo> get_installed_eras() {
+    std::vector<EraInfo> out;
+    bool has_2026 = false;
+
+    HMODULE core = GetModuleHandleW(L"swofty_core.dll");
+    if (core) {
+        using ContentOpsFn = const SwoftyContentOps *(*)();
+        auto fn = reinterpret_cast<ContentOpsFn>(GetProcAddress(core, "SwoftyCoreContentOps"));
+        if (fn && fn() && fn()->owned && fn()->owned("f1_2026") == SWOFTY_OWNERSHIP_OWNED) {
+            has_2026 = true;
+        }
+    }
+
+    // A season counts as installed when its Swofty grid list (sw_f1_<year>) is in the database;
+    // each Swofty season addon adds one, so new seasons (e.g. 2012, 2011) show up without a mod update.
+    std::map<std::string, int64_t> rows;
+    std::vector<int> years;
+    if (swofty::db::available()) {
+        swofty::db::Cursor cur{};
+        int64_t row_idx = 0;
+        if (swofty::db::open("entrants.entrant_lists", &cur) == swofty::db::Result::ok) {
+            do {
+                if (const char *name = swofty::db::row_name(&cur)) {
+                    std::string id(name);
+                    if (!rows.count(id)) rows[id] = row_idx;
+                    if (id.size() == 10 && id.rfind("sw_f1_", 0) == 0 &&
+                        std::isdigit(static_cast<unsigned char>(id[6])) && std::isdigit(static_cast<unsigned char>(id[7])) &&
+                        std::isdigit(static_cast<unsigned char>(id[8])) && std::isdigit(static_cast<unsigned char>(id[9]))) {
+                        int yr = std::atoi(id.c_str() + 6);
+                        if (yr >= 1950 && yr <= 2100 && std::find(years.begin(), years.end(), yr) == years.end()) years.push_back(yr);
+                    }
+                }
+                ++row_idx;
+            } while (swofty::db::step(&cur) == swofty::db::Result::ok);
+        }
+    }
+    std::sort(years.begin(), years.end());
+    for (int yr : years) {
+        std::string ys = std::to_string(yr);
+        // Prefer the f1cg list for the menu (nicer team/driver names); the build maps it to sw_f1_<year>.
+        std::string id = rows.count("f1cg_f1_" + ys) ? "f1cg_f1_" + ys : "sw_f1_" + ys;
+        out.push_back({id, ys + " Swofty", rows[id]});
+    }
+    if (rows.count("f1_2025")) out.push_back({"f1_2025", "F1 25", rows["f1_2025"]});
+    if (has_2026 && rows.count("f1_2026")) out.push_back({"f1_2026", "F1 26", rows["f1_2026"]});
+
+    if (out.empty()) {
+        out.push_back({"f1_2025", "F1 25", -1});
+        if (has_2026) out.push_back({"f1_2026", "F1 26", -1});
+    }
+    return out;
+}
+
+std::vector<std::string> get_gp_mounted_track_ids() {
+    std::vector<std::string> mounted;
+    resolve_all_game_addrs();
+    if (!g_addrs.game_manager || !g_addrs.mode_by_predicate || !g_addrs.gp_predicate) return mounted;
+    void *mgr = nullptr;
+    if (!rd(reinterpret_cast<void *>(g_addrs.game_manager), 0, mgr) || !mgr) return mounted;
+    void *modes = nullptr;
+    if (!rd(mgr, MANAGER_MODES, modes) || !modes) return mounted;
+    void *pred = reinterpret_cast<void *>(g_addrs.gp_predicate);
+    uint8_t *e = reinterpret_cast<ModeByPredicateFn *>(g_addrs.mode_by_predicate)(modes, &pred);
+    if (!e || !swofty::mem::readable(e, ENTITY_TRACKS + 8)) return mounted;
+    uint8_t *tracks = *reinterpret_cast<uint8_t **>(e + ENTITY_TRACKS);
+    if (!tracks || !swofty::mem::readable(tracks, 0x38)) return mounted;
+    for (auto *q = *reinterpret_cast<uint8_t **>(tracks + 0x28), *qend = *reinterpret_cast<uint8_t **>(tracks + 0x30);
+         q && q < qend && swofty::mem::readable(q, 16); q += 16) {
+        auto *rec = *reinterpret_cast<uint8_t **>(q + 8);
+        const char *name = rec && swofty::mem::readable(rec, 0x80) ? *reinterpret_cast<const char **>(rec + 0x78) : nullptr;
+        if (name && *name) {
+            mounted.emplace_back(name);
+        }
+    }
+    return mounted;
+}
+
+std::vector<TrackInfo> get_installed_tracks() {
+    std::vector<TrackInfo> out;
+    auto mounted = get_gp_mounted_track_ids();
+    auto is_mounted = [&](const std::string &id) {
+        if (mounted.empty()) return true;
+        for (const auto &m : mounted) {
+            if (m == id) return true;
+        }
+        return false;
+    };
+    auto add_track = [&](const std::string &id) {
+        if (id.empty() || id.find("test") != std::string::npos || id.find("showroom") != std::string::npos ||
+            id.find("frontend") != std::string::npos || id.find("generic") != std::string::npos) {
+            return;
+        }
+        if (!is_mounted(id)) return;
+        for (const auto &t : out) {
+            if (t.id == id) return;
+        }
+        out.push_back({id, prettify_token(id)});
+    };
+
+    const char *stock[] = {
+        "melbourne", "shanghai", "suzuka", "bahrain", "jeddah", "miami", "imola", "monaco",
+        "catalunya", "montreal", "red_bull_ring", "silverstone", "spa", "budapest", "zandvoort",
+        "monza", "baku", "singapore", "austin", "mexico", "interlagos", "vegas", "qatar", "yas_marina"
+    };
+    for (const char *s : stock) add_track(s);
+
+    if (swofty::db::available()) {
+        swofty::db::Cursor cur{};
+        if (swofty::db::open("tracks", &cur) == swofty::db::Result::ok) {
+            do {
+                if (const char *name = swofty::db::row_name(&cur)) {
+                    add_track(name);
+                }
+            } while (swofty::db::step(&cur) == swofty::db::Result::ok);
+        }
+    }
+    return out;
+}
+
+std::vector<SeatChoice> get_seats_for_era(const std::string &era_id, int64_t row_idx) {
+    std::vector<SeatChoice> out;
+    if (!swofty::db::available()) return out;
+
+    std::map<int64_t, std::string> team_names;
+    std::map<int64_t, std::string> driver_names;
+
+    {
+        swofty::db::Cursor cur{};
+        if (swofty::db::open("entrants.teams", &cur) == swofty::db::Result::ok) {
+            do {
+                const char *meta = swofty::db::row_name(&cur);
+                int64_t sid = -1;
+                if (meta && cursor_int(&cur, "stat_id", sid) && sid >= 0) {
+                    team_names[sid] = meta;
+                }
+            } while (swofty::db::step(&cur) == swofty::db::Result::ok);
+        }
+    }
+    {
+        swofty::db::Cursor cur{};
+        if (swofty::db::open("entrants.drivers", &cur) == swofty::db::Result::ok) {
+            do {
+                const char *meta = swofty::db::row_name(&cur);
+                int64_t sid = -1;
+                if (meta && cursor_int(&cur, "stat_id", sid) && sid >= 0) {
+                    driver_names[sid] = meta;
+                }
+            } while (swofty::db::step(&cur) == swofty::db::Result::ok);
+        }
+    }
+
+    if (row_idx < 0) {
+        swofty::db::Cursor cur{};
+        int64_t idx = 0;
+        if (swofty::db::open("entrants.entrant_lists", &cur) == swofty::db::Result::ok) {
+            do {
+                if (const char *name = swofty::db::row_name(&cur)) {
+                    if (era_id == name) { row_idx = idx; break; }
+                }
+                ++idx;
+            } while (swofty::db::step(&cur) == swofty::db::Result::ok);
+        }
+    }
+
+    auto read_field = [](const std::string &key, int64_t &out_i, std::string &out_s) {
+        swofty::db::Value v{};
+        if (swofty::db::get(key, &v) != swofty::db::Result::ok) return false;
+        if (v.tag == SWOFTY_DB_INT || v.tag == SWOFTY_DB_ID || v.tag == SWOFTY_DB_ENUM) {
+            out_i = v.i;
+            return true;
+        }
+        if (v.tag == SWOFTY_DB_STRING && v.s && *v.s) {
+            out_s = v.s;
+            return true;
+        }
+        return false;
+    };
+
+    std::vector<std::string> bases;
+    if (row_idx >= 0) {
+        bases.push_back("entrants.entrant_lists.entrant_list_" + std::to_string(row_idx) + ".entrant_");
+    }
+    bases.push_back("entrants.entrant_lists." + era_id + ".entrant_");
+
+    for (const auto &base : bases) {
+        for (int i = 0; i < 30; ++i) {
+            std::string prefix = base + std::to_string(i);
+            int64_t t_id = -1, d_id = -1;
+            std::string t_raw, d_raw;
+            read_field(prefix + ".team", t_id, t_raw);
+            read_field(prefix + ".driver", d_id, d_raw);
+
+            std::string tid;
+            if (t_id >= 0 && team_names.count(t_id)) tid = team_names[t_id];
+            else if (!t_raw.empty()) tid = t_raw;
+
+            std::string did;
+            if (d_id >= 0 && driver_names.count(d_id)) did = driver_names[d_id];
+            else if (!d_raw.empty()) did = d_raw;
+
+            if (!tid.empty()) {
+                if (tid.find("safety") != std::string::npos) continue;
+                out.push_back({
+                    tid,
+                    prettify_token(tid),
+                    did,
+                    did.empty() ? "Team Lead Driver" : prettify_token(did)
+                });
+            }
+        }
+        if (!out.empty()) break;
+    }
+
+    return out;
+}
+
+void reroll_seat_for_current_era() {
+    auto seats = get_seats_for_era(g_cfg.era_id, g_cfg.era_row_index);
+    if (!seats.empty()) {
+        std::uniform_int_distribution<size_t> dist(0, seats.size() - 1);
+        const auto &s = seats[dist(g_rng)];
+        g_cfg.team_id = s.team_id;
+        g_cfg.team_label = s.team_label;
+        g_cfg.driver_id = s.driver_id;
+        g_cfg.driver_label = s.driver_label;
+    } else {
+        g_cfg.team_id.clear();
+        g_cfg.team_label = "Random Team";
+        g_cfg.driver_id.clear();
+        g_cfg.driver_label = "Random Driver";
+    }
+}
+
+void reroll_era() {
+    auto eras = get_installed_eras();
+    if (!eras.empty()) {
+        std::uniform_int_distribution<size_t> dist(0, eras.size() - 1);
+        const auto &e = eras[dist(g_rng)];
+        g_cfg.era_id = e.id;
+        g_cfg.era_label = e.label;
+        g_cfg.era_row_index = e.row_index;
+    }
+    reroll_seat_for_current_era();
+}
+
+void reroll_track() {
+    auto tracks = get_installed_tracks();
+    if (!tracks.empty()) {
+        std::uniform_int_distribution<size_t> dist(0, tracks.size() - 1);
+        const auto &t = tracks[dist(g_rng)];
+        g_cfg.track_id = t.id;
+        g_cfg.track_label = t.label;
+    }
+}
+
+void randomize_all() {
+    reroll_era();
+    reroll_track();
+    std::uniform_int_distribution<int> wdist(0, 3);
+    g_cfg.weather = (wdist(g_rng) == 0) ? "Wet" : "Dry";
+}
+
+// --- Hooks for Laps & Weather ---
+uint64_t hook_build_settings(void *mode, uint8_t *settings) {
+    uint64_t r = orig_build_settings ? orig_build_settings(mode, settings) : 0;
+    int st = g_stage.load();
+    if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xe00)) {
+        uint32_t sid = *reinterpret_cast<uint32_t *>(settings + 4);
+        if (sid >= 15 && sid <= 17) {
+            {
+                uint32_t &flag = *reinterpret_cast<uint32_t *>(settings + 0x16c);
+                if (flag) ilog("[instant-race] SessionSettings +0x16c was %u; cleared (prevents phantom lap at the start)", flag);
+                flag = 0;
+            }
+            int want_laps = 5;
+            {
+                std::lock_guard lock(g_mutex);
+                want_laps = static_cast<int>(std::lround(g_cfg.laps));
+            }
+            if (want_laps > 0 && want_laps <= 100) {
+                auto &stored = *reinterpret_cast<uint32_t *>(settings + 0xdf0);
+                uint32_t key = *reinterpret_cast<uint32_t *>(settings + 0xdf8);
+                stored = static_cast<uint32_t>(want_laps) ^ key;
+                swofty::log("[instant-race] Applied custom race length: %d laps", want_laps);
+            }
+        }
+    }
+    return r;
+}
+
+int hook_weather_pick(void *sys, int a2, int a3, int a4) {
+    int st = g_stage.load();
+    if (st != static_cast<int>(LaunchStage::idle)) {
+        bool want_wet = false;
+        {
+            std::lock_guard lock(g_mutex);
+            want_wet = (g_cfg.weather == "Wet");
+        }
+        swofty::log("[instant-race] Overriding session weather to %s", want_wet ? "Wet (Heavy Rain)" : "Dry (Clear)");
+        return want_wet ? 4 : 0;
+    }
+    return orig_weather_pick ? orig_weather_pick(sys, a2, a3, a4) : 0;
+}
+
+// --- Flow State Machine Hook (scanned dynamically) ---
+uint8_t *find_flow_node(uint32_t want) {
+    uint8_t *root = g_flow_root.load();
+    if (!root) return nullptr;
+    std::vector<uint8_t *> todo{root};
+    for (size_t i = 0; i < todo.size() && i < 1024; ++i) {
+        uint8_t *n = todo[i];
+        if (!n || !swofty::mem::readable(n, 0xc8)) continue;
+        if (*reinterpret_cast<uint32_t *>(n + STATE_HASH) == want) return n;
+        auto *cv = *reinterpret_cast<uint8_t **>(n + STATE_CHILDREN);
+        if (!cv || !swofty::mem::readable(cv, 0x18)) continue;
+        for (auto **p = *reinterpret_cast<uint8_t ***>(cv + 8), **e = *reinterpret_cast<uint8_t ***>(cv + 0x10);
+             p && p < e && swofty::mem::readable(p, 8); ++p) {
+            todo.push_back(*p);
+        }
+    }
+    return nullptr;
+}
+
+void despawn_menu_scene() {
+    if (g_scene_despawned || !g_addrs.despawn_main_scene) return;
+    uint8_t *node = find_flow_node(STATE_FRONTEND);
+    uint8_t *mgr = nullptr;
+    if (node && rd(node, FRONTEND_SCENES, mgr) && mgr) {
+        uint8_t *scenes = nullptr;
+        if (rd(mgr, SCENES_MAIN, scenes) && scenes && swofty::mem::readable(scenes, MAIN_SPAWNED + 2)) {
+            if (scenes[MAIN_SPAWNED] || scenes[MAIN_SPAWNED + 1]) {
+                g_scene_despawned = true;
+                reinterpret_cast<void (*)(void *)>(g_addrs.despawn_main_scene)(mgr);
+                swofty::log("[instant-race] Despawned main menu scene");
+            }
+        }
+    }
+}
+
+std::atomic<uint64_t> g_session_at_ms{0};
+std::atomic<bool> g_session_visible{false};
+uint32_t g_last_fade_mask = ~0u;
+uint32_t g_last_fade_state = ~0u;
+int g_fade_log_count = 0;
+
+constexpr uint32_t FADE_STUCK_MENU = 0x80000000u; // Leftover menu fade bit seen when unwinding StateFrontend directly
+
+void release_fade_mask() {
+    if (g_fade_released || !g_addrs.game_root) return;
+    auto *root = *reinterpret_cast<uint8_t **>(g_addrs.game_root);
+    uint8_t *owner = nullptr;
+    if (!root || !rd(root, 0xa0, owner) || !owner || !swofty::mem::readable(owner + 0x7b8, 0x18)) {
+        ilog("[instant-race] release_fade_mask: game_root=%p root=%p owner=%p (unreadable)",
+             (void *)g_addrs.game_root, root, owner);
+        return;
+    }
+    g_fade_released = true;
+    auto &mask = *reinterpret_cast<uint32_t *>(owner + 0x7b8);
+    uint32_t was = mask;
+    uint32_t st_before = *reinterpret_cast<uint32_t *>(owner + 0x7bc);
+    mask &= ~(FADE_FRONTEND | 1u | FADE_STUCK_MENU);
+    if (mask == 0) {
+        *reinterpret_cast<uint32_t *>(owner + 0x7bc) = 3;
+        owner[0x7cc] = 0;
+    }
+    *reinterpret_cast<uint32_t *>(owner + 0x7c4) = 0xd47eb226;
+    uint32_t st_after = *reinterpret_cast<uint32_t *>(owner + 0x7bc);
+    if (mask == 0 && st_after == 3) {
+        g_session_visible.store(true);
+    }
+    ilog("[instant-race] Fade mask released on owner %p: %08x -> %08x, state %u -> %u",
+         owner, was, mask, st_before, st_after);
+}
+
+void note_session_fade() {
+    uint64_t sat = g_session_at_ms.load();
+    if (!sat || g_fade_log_count >= 40 || !g_addrs.game_root) return;
+    auto *root = *reinterpret_cast<uint8_t **>(g_addrs.game_root);
+    uint8_t *owner = nullptr;
+    if (!root || !rd(root, 0xa0, owner) || !owner || !swofty::mem::readable(owner + 0x7b8, 0x18)) return;
+    auto &mask_ref = *reinterpret_cast<uint32_t *>(owner + 0x7b8);
+    if (mask_ref & FADE_STUCK_MENU) {
+        uint32_t before = mask_ref;
+        mask_ref &= ~FADE_STUCK_MENU;
+        if (mask_ref == 0 && *reinterpret_cast<uint32_t *>(owner + 0x7bc) != 3) {
+            *reinterpret_cast<uint32_t *>(owner + 0x7bc) = 3;
+            owner[0x7cc] = 0;
+            *reinterpret_cast<uint32_t *>(owner + 0x7c4) = 0xd47eb226;
+        }
+        ilog("[instant-race] Cleared stuck menu fade bit: %08x -> %08x (state=%u)",
+             before, mask_ref, *reinterpret_cast<uint32_t *>(owner + 0x7bc));
+    }
+    uint32_t mask = mask_ref;
+    uint32_t state = *reinterpret_cast<uint32_t *>(owner + 0x7bc);
+    if (mask == g_last_fade_mask && state == g_last_fade_state) return;
+    bool faded_in = (mask == 0 && state == 3);
+    g_last_fade_mask = mask;
+    g_last_fade_state = state;
+    ++g_fade_log_count;
+    uint64_t ms = GetTickCount64() - sat;
+    ilog("[instant-race] Fade owner %p: mask=%08x, state=%u (%llu ms into session)",
+         owner, mask, state, static_cast<unsigned long long>(ms));
+    if (faded_in && !g_session_visible.exchange(true)) {
+        ilog("[instant-race] Broadcast faded in after %llu ms; removing cover", static_cast<unsigned long long>(ms));
+    }
+}
+
+// Returns true once both sync nodes exist and have been set, false if they are not there yet (caller retries).
+bool complete_load_sync(uint8_t *state) {
+    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
+    if (!base) return false;
+    static uintptr_t fn_set_bool = 0;
+    if (!fn_set_bool) {
+        fn_set_bool = scan_pattern("41 56 56 57 55 53 48 81 EC 20 03 00 00 F6 41 26 01 0F 85 ?? ?? ?? ?? 44 89 CB 44 89 C7 49 89 D6 48 89 CE 48 8B 49 58 48 8B 01 FF 50 38 84 DB 75 0E 0F B6 08");
+        if (!fn_set_bool) {
+            ilog("[instant-race] node_set_bool signature not found; cannot complete the load sync");
+            return false;
+        }
+    }
+    uint8_t *sync = state + LOAD_SYNC;
+    if (!swofty::mem::readable(sync, 0xb0)) return false;
+    const uint8_t one = 1;
+    using NodeSetBool_t = void (*)(void *, const uint8_t *, int, int);
+    bool all_found = true;
+    for (size_t off : {size_t(0x80), size_t(0xa0)}) {
+        void *node = *reinterpret_cast<void **>(sync + off);
+        if (!node || !swofty::mem::readable(node, 0x60)) {
+            all_found = false;
+            continue;
+        }
+        if (!(static_cast<uint8_t *>(node)[0x26] & 1)) {
+            reinterpret_cast<NodeSetBool_t>(fn_set_bool)(node, &one, 0, 0);
+            swofty::log("[instant-race] Set StateLoadSession sync node +0x%zx (%p) to true", off, node);
+        }
+    }
+    return all_found;
+}
+
+// Make the weekend's first session the Race (what direct_start.cpp's choose_session does).
+// The weekend structure itself is already built once, earlier, in build_grand_prix_weekend().
+void choose_race_session() {
+    if (!g_addrs.game_manager) return;
+    void *mgr = nullptr;
+    if (!rd(reinterpret_cast<void *>(g_addrs.game_manager), 0, mgr) || !mgr) return;
+    void *modes = nullptr;
+    if (!rd(mgr, MANAGER_MODES, modes) || !modes) return;
+
+    uint8_t *wk = nullptr;
+    {
+        uint8_t *holder = nullptr, *entity = nullptr, *champ = nullptr, *sb = nullptr, *se = nullptr,
+                *season = nullptr, **wb = nullptr, **we = nullptr;
+        uint32_t si = 0, wi = 0;
+        if (!rd(modes, 0x88, holder) || !rd(holder, 0x260, entity) || !rd(entity, 0x1058, champ) ||
+            !rd(champ, 0x548, sb) || !rd(champ, 0x550, se) || !rd(champ, 0x560, si) || se <= sb ||
+            si >= size_t(se - sb) / 16 || !rd(sb, size_t(si) * 16 + 8, season) || !rd(season, 0x288, wb) ||
+            !rd(season, 0x290, we) || !rd(season, 0x2a0, wi) || we <= wb || wi >= size_t(we - wb) ||
+            !rd(wb, size_t(wi) * 8, wk) || !swofty::mem::readable(wk, 0x280)) {
+            swofty::log("[instant-race] choose_race_session: no current weekend to read");
+            return;
+        }
+    }
+    auto *b = *reinterpret_cast<uint8_t **>(wk + 0x220);
+    auto *e = *reinterpret_cast<uint8_t **>(wk + 0x228);
+    auto &cur = *reinterpret_cast<uint32_t *>(wk + 0x238);
+    if (b && e > b && swofty::mem::readable(b, 0xa0)) {
+        if (cur != 0) {
+            swofty::log("[instant-race] Weekend current session %u -> 0", cur);
+            cur = 0;
+        }
+        auto &id = *reinterpret_cast<uint32_t *>(b + 0x8);
+        swofty::log("[instant-race] Weekend session[0] id %u -> 15 (Race)", id);
+        id = 15;
+        int ts = g_track_stat.load();
+        if (ts >= 0 && wk[0x278] != uint8_t(ts)) {
+            swofty::log("[instant-race] Weekend track stat id %u -> %d", unsigned(wk[0x278]), ts);
+            wk[0x278] = uint8_t(ts);
+        }
+    } else {
+        swofty::log("[instant-race] choose_race_session: weekend has no readable sessions");
+    }
+}
+
+// --- UI Router & Activity Container Navigation (fe_home -> home_to_activity -> solo_gp) ---
+struct NeStr;
+using MakeNeStr_t = void (*)(NeStr **out, const char *s, int a3, int a4);
+using FireRoute_t = void (*)(void *router, void *vm, NeStr **name, uint64_t a4);
+using ContainerCmd_t = uint64_t (*)(void *container, NeStr **message, void *third);
+using FeHomeCmd_t = uint64_t (*)(void *vm, void *a2, void *a3);
+
+FireRoute_t orig_fire_route = nullptr;
+ContainerCmd_t orig_container_cmd = nullptr;
+FeHomeCmd_t orig_fehome_cmd = nullptr;
+
+std::atomic<void *> g_last_router{nullptr};
+std::atomic<void *> g_home_vm{nullptr};
+std::atomic<void *> g_container_vm{nullptr};
+std::atomic<void *> g_container_third{nullptr};
+std::atomic<uint64_t> g_container_at{0};
+std::atomic<bool> g_solo_gp_sent{false};
+std::atomic<bool> g_route_fired{false};
+uintptr_t a_fire_route = 0;
+uintptr_t a_make_nestr = 0;
+uintptr_t a_container_cmd = 0;
+
+uint32_t djb2_hash(const char *s) {
+    uint32_t h = 5381;
+    while (s && *s) {
+        h = ((h << 5) + h) ^ static_cast<uint8_t>(*s++);
+    }
+    return h;
+}
+
+uint64_t fehome_cmd_detour(void *vm, void *a2, void *a3) {
+    if (vm && swofty::mem::readable(vm, 0x260)) {
+        g_home_vm.store(vm);
+        void *r = *reinterpret_cast<void **>(static_cast<uint8_t *>(vm) + 0x28);
+        if (r) g_last_router.store(r);
+    }
+    return orig_fehome_cmd ? orig_fehome_cmd(vm, a2, a3) : 0;
+}
+
+void fire_route_detour(void *router, void *vm, NeStr **name, uint64_t a4) {
+    if (router) g_last_router.store(router);
+    if (orig_fire_route) orig_fire_route(router, vm, name, a4);
+}
+
+uint64_t container_cmd_detour(void *container, NeStr **message, void *third) {
+    if (container && g_container_vm.exchange(container) != container) {
+        g_container_at.store(GetTickCount64());
+        g_solo_gp_sent.store(false);
+    }
+    if (third) g_container_third.store(third);
+    return orig_container_cmd ? orig_container_cmd(container, message, third) : 0;
+}
+
+void init_ui_route_hooks() {
+    static std::atomic<bool> done{false};
+    if (done.exchange(true)) return;
+    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
+    if (!base) return;
+
+    a_make_nestr = scan_pattern("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20 48 8B 39 45 8B F9 41 8B E8 48 8B F2 48 85 FF");
+    if (!a_make_nestr && swofty::api->resolve) {
+        a_make_nestr = swofty::api->resolve("Ne_Make_StrFromCStr");
+    }
+
+    uintptr_t fire_site = scan_pattern("48 8B 4E 28 48 89 F2 49 89 F8 45 31 C9 E8 ?? ?? ?? ?? E9 E4 00 00 00");
+    if (fire_site && swofty::mem::readable(reinterpret_cast<void *>(fire_site + 13), 5)) {
+        int32_t rel = *reinterpret_cast<int32_t *>(fire_site + 14);
+        a_fire_route = fire_site + 18 + rel;
+    }
+    if (!a_fire_route && swofty::api->resolve) {
+        a_fire_route = swofty::api->resolve("Vm_Fire_Route");
+    }
+    if (!a_fire_route) {
+        a_fire_route = base + 0x42c0e20;
+    }
+
+    a_container_cmd = scan_pattern("41 57 41 56 41 55 41 54 56 57 53 48 81 EC B0 00 00 00 48 8B 02 48 85 C0 0F 84 ?? ?? ?? ?? 4C 89 C7 49 89 D0 48 89 CE 8B 00 3D 37 3B FC FC 0F 8E ?? ?? ?? ?? 3D BD FC E1 41");
+    if (!a_container_cmd) a_container_cmd = base + 0x1a77d60;
+
+    uint8_t *mid = reinterpret_cast<uint8_t *>(a_container_cmd + 30);
+    if (mid && swofty::mem::readable(mid, 16) &&
+        mid[0] == 0x4C && mid[1] == 0x89 && mid[2] == 0xC7 && mid[3] == 0x49 && mid[4] == 0x89 && mid[5] == 0xD0) {
+        uint8_t *stub = static_cast<uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (stub) {
+            static auto on_container_args = +[](void *vm, void *third) {
+                if (vm) {
+                    if (g_container_vm.exchange(vm) != vm) {
+                        g_container_at.store(GetTickCount64());
+                        g_solo_gp_sent.store(false);
+                        swofty::log("[instant-race] Captured activity container VM %p (third=%p) at HandleCommand+30!", vm, third);
+                    }
+                    if (third) g_container_third.store(third);
+                }
+            };
+            size_t p = 0;
+            stub[p++] = 0x50; // push rax (original code needs it)
+            stub[p++] = 0x51; stub[p++] = 0x52;
+            stub[p++] = 0x41; stub[p++] = 0x50;
+            stub[p++] = 0x41; stub[p++] = 0x51;
+            stub[p++] = 0x41; stub[p++] = 0x52;
+            stub[p++] = 0x41; stub[p++] = 0x53;
+            stub[p++] = 0x55;                                             // push rbp
+            stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xE5;         // mov rbp, rsp
+            stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xE4; stub[p++] = 0xF0; // and rsp, -16
+            stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xEC; stub[p++] = 0x20; // sub rsp, 0x20
+            stub[p++] = 0x4C; stub[p++] = 0x89; stub[p++] = 0xC2;
+            stub[p++] = 0x48; stub[p++] = 0xB8;
+            uint64_t cb_addr = reinterpret_cast<uint64_t>(on_container_args);
+            std::memcpy(stub + p, &cb_addr, 8); p += 8;
+            stub[p++] = 0xFF; stub[p++] = 0xD0;
+            stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xEC;         // mov rsp, rbp
+            stub[p++] = 0x5D;                                             // pop rbp
+            stub[p++] = 0x41; stub[p++] = 0x5B;
+            stub[p++] = 0x41; stub[p++] = 0x5A;
+            stub[p++] = 0x41; stub[p++] = 0x59;
+            stub[p++] = 0x41; stub[p++] = 0x58;
+            stub[p++] = 0x5A; stub[p++] = 0x59;
+            stub[p++] = 0x58; // pop rax
+            std::memcpy(stub + p, mid, 16); p += 16;
+            stub[p++] = 0xFF; stub[p++] = 0x25;
+            *reinterpret_cast<uint32_t *>(stub + p) = 0; p += 4;
+            uint64_t back_addr = reinterpret_cast<uint64_t>(mid + 16);
+            std::memcpy(stub + p, &back_addr, 8); p += 8;
+
+            DWORD oldp = 0;
+            if (VirtualProtect(mid, 16, PAGE_EXECUTE_READWRITE, &oldp)) {
+                mid[0] = 0xFF; mid[1] = 0x25;
+                *reinterpret_cast<uint32_t *>(mid + 2) = 0;
+                *reinterpret_cast<uint64_t *>(mid + 6) = reinterpret_cast<uint64_t>(stub);
+                mid[14] = 0x90; mid[15] = 0x90;
+                VirtualProtect(mid, 16, oldp, &oldp);
+                FlushInstructionCache(GetCurrentProcess(), mid, 16);
+                swofty::log("[instant-race] Hooked HandleCommand+30 at %p -> stub %p", mid, stub);
+            }
+        }
+    }
+}
+
+bool fire_ui_route(const char *group, const char *route) {
+    void *router = g_last_router.load();
+    if (!router || !a_fire_route || !a_make_nestr) {
+        swofty::log("[instant-race] Cannot fire route '%s' (router=%p, fire=0x%llx, nestr=0x%llx)",
+                    route, router, (unsigned long long)a_fire_route, (unsigned long long)a_make_nestr);
+        return false;
+    }
+    void *vm_arg = g_home_vm.load();
+    alignas(16) static uint8_t scratch[0x400];
+    if (!vm_arg || !swofty::mem::readable(vm_arg, 0x260)) {
+        std::memset(scratch, 0, sizeof(scratch));
+        *reinterpret_cast<uint32_t *>(scratch + 0x250) = djb2_hash(group);
+        vm_arg = scratch;
+    }
+    NeStr *name = nullptr;
+    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, route, 0, 0);
+    swofty::log("[instant-race] Firing UI route '%s' in group '%s' on router %p (vm=%p)", route, group, router, vm_arg);
+    if (orig_fire_route) {
+        orig_fire_route(router, vm_arg, &name, 0);
+    } else {
+        reinterpret_cast<FireRoute_t>(a_fire_route)(router, vm_arg, &name, 0);
+    }
+    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, nullptr, 0, 0);
+    return true;
+}
+
+void raise_container_cmd(const char *cmd) {
+    void *cvm = g_container_vm.load();
+    if (!cvm || !a_container_cmd || !a_make_nestr) return;
+    static uint8_t zero[0x100];
+    NeStr *name = nullptr;
+    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, cmd, 0, 0);
+    swofty::log("[instant-race] Raising container command '%s' on %p", cmd, cvm);
+    void *third = g_container_third.load();
+    reinterpret_cast<ContainerCmd_t>(a_container_cmd)(cvm, &name, third ? third : zero);
+    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, nullptr, 0, 0);
+}
+
+bool build_grand_prix_weekend(const RaceConfig &cfg);
+
+extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link) {
+    if (!state || !swofty::mem::readable(state, STATE_CHILD + 8)) return link;
+    uint32_t hash = *reinterpret_cast<uint32_t *>(state + STATE_HASH);
+    (void)STATE_CHILD;
+
+    if (hash == STATE_APP && !g_flow_root.load()) {
+        g_flow_root.store(state);
+    }
+    // Only mark main menu ready when STATE_FRONTEND (0x957880c6) itself is updating in active state (status == 2)
+    if (hash == STATE_FRONTEND && *reinterpret_cast<uint8_t *>(state + STATE_STATUS) == 2) {
+        g_frontend_seen_ms.store(GetTickCount64());
+        int cur_st = g_stage.load();
+        if (cur_st == static_cast<int>(LaunchStage::idle) || cur_st == static_cast<int>(LaunchStage::done)) {
+            if (g_in_session.exchange(false)) {
+                g_stage.store(static_cast<int>(LaunchStage::idle));
+                g_session_at_ms.store(0);
+                g_session_visible.store(false);
+                ilog("[instant-race] Returned to main menu (STATE_FRONTEND active); [F7] Instant Race re-armed");
+            }
+        }
+    }
+
+    int st = g_stage.load();
+    if (st == static_cast<int>(LaunchStage::set_mode) || st == static_cast<int>(LaunchStage::wait_rounds)) {
+        if (hash == STATE_FRONTEND || hash == STATE_FRONTEND_WORLD) {
+            RaceConfig cfg_copy;
+            {
+                std::lock_guard lock(g_mutex);
+                cfg_copy = g_cfg;
+            }
+            if (build_grand_prix_weekend(cfg_copy)) {
+                g_stage.store(static_cast<int>(LaunchStage::leave_frontend));
+                g_stage_ts = GetTickCount64();
+                swofty::log("[instant-race] Weekend ready on flow thread; unwinding frontend states directly to session...");
+            }
+        }
+        return link;
+    }
+
+    if (st == static_cast<int>(LaunchStage::leave_frontend)) {
+        constexpr uint32_t DS_LINK_EXIT = 0x0eef86be;
+        constexpr uint32_t DS_LINK_SESSION = 0x8c23ce89;
+        bool has_child = *reinterpret_cast<void **>(state + STATE_CHILD) != nullptr;
+        // 1. Raise eInterruptExit (0xe) on the shared interrupt queue (+0xbf8) and return DS_LINK_EXIT on child states of StateFrontendWorld
+        if (hash != STATE_FRONTEND_WORLD && hash != STATE_APP) {
+            uint8_t *queue = nullptr;
+            if (swofty::mem::readable(state + 0xbf8, 8)) {
+                queue = *reinterpret_cast<uint8_t **>(state + 0xbf8);
+                if (queue && swofty::mem::readable(queue + 0x44, 4)) {
+                    auto *qtype = reinterpret_cast<uint32_t *>(queue + 0x40);
+                    if (*qtype == 0) {
+                        *qtype = 0xe;
+                        swofty::log("[instant-race] Raised eInterruptExit (0xe) on state %08x queue %p", hash, queue);
+                    }
+                }
+            }
+            if (!has_child) {
+                swofty::log("[instant-race] Unwinding leaf state %08x with LINK_EXIT (%08x)", hash, DS_LINK_EXIT);
+                return DS_LINK_EXIT;
+            }
+        }
+
+        // 2. Once StateFrontendWorld (0x290b11ae) has no active child, force DS_LINK_SESSION (0x8c23ce89) to enter StateLoadSession!
+        if (hash == STATE_FRONTEND_WORLD && !has_child) {
+            // Clear eInterruptExit (0xe) from shared queue so StateLoadSession doesn't inherit it
+            if (swofty::mem::readable(state + 0xbf8, 8)) {
+                uint8_t *queue = *reinterpret_cast<uint8_t **>(state + 0xbf8);
+                if (queue && swofty::mem::readable(queue + 0x44, 4)) {
+                    auto *qtype = reinterpret_cast<uint32_t *>(queue + 0x40);
+                    if (*qtype == 0xe) *qtype = 0;
+                }
+            }
+            swofty::log("[instant-race] StateFrontendWorld has no child -> returning DS_LINK_SESSION (%08x)!", DS_LINK_SESSION);
+            g_stage.store(static_cast<int>(LaunchStage::loading_session));
+            g_stage_ts = GetTickCount64();
+            return DS_LINK_SESSION;
+        }
+        return link;
+    } else if (st == static_cast<int>(LaunchStage::loading_session)) {
+        // Walk the flow tree from the root down to StateLoadSession (the same walk direct_start.cpp does).
+        uint8_t *root = g_flow_root.load();
+        if (root && !g_load_sync_done) {
+            for (uint8_t *n = root; n && swofty::mem::readable(n, STATE_CHILD + 8);
+                 n = *reinterpret_cast<uint8_t **>(n + STATE_CHILD)) {
+                if (*reinterpret_cast<uint32_t *>(n + STATE_HASH) != STATE_LOAD_SESSION) continue;
+
+                if (!g_chose_sess.exchange(true)) {
+                    ilog("[instant-race] StateLoadSession entered");
+                    choose_race_session();
+                }
+
+                // StateLoadSession's exit waits for a sync point that the loading screen normally sets.
+                // Once it has been exiting for a while, set it ourselves. Retry (like direct_start.cpp)
+                // until both sync nodes exist, instead of giving up after one attempt.
+                if (*reinterpret_cast<uint8_t *>(n + STATE_STATUS) != 3) {
+                    g_load_exit_ts = 0;
+                } else {
+                    uint64_t now = GetTickCount64();
+                    if (!g_load_exit_ts) g_load_exit_ts = now;
+                    if (g_load_sync_tries < 10 && now - g_load_exit_ts >= 500ull * static_cast<uint64_t>(g_load_sync_tries + 1)) {
+                        ++g_load_sync_tries;
+                        g_load_sync_done = complete_load_sync(n);
+                        ilog("[instant-race] StateLoadSession exiting for %llu ms: sync point is %s (try %d)",
+                             static_cast<unsigned long long>(now - g_load_exit_ts),
+                             g_load_sync_done ? "complete" : "not ready yet", g_load_sync_tries);
+                    }
+                }
+                break;
+            }
+        }
+        if (hash == STATE_SESSION && *reinterpret_cast<uint8_t *>(state + STATE_STATUS) == 2) {
+            if (!g_session_at_ms.load()) {
+                g_session_at_ms.store(GetTickCount64());
+                ilog("[instant-race] STATE_SESSION active (game_root=%p)", (void *)g_addrs.game_root);
+            }
+            despawn_menu_scene();
+            ilog("[instant-race] Main menu scene despawn %s", g_scene_despawned ? "done" : "not needed/not found");
+            release_fade_mask();
+            g_stage.store(static_cast<int>(LaunchStage::done));
+            g_raced_once = true;
+            ilog("[instant-race] Session active! Handover complete.");
+        }
+    } else if (st == static_cast<int>(LaunchStage::done)) {
+        note_session_fade();
+    }
+    return link;
+}
+
+bool install_flow_hook() {
+    if (g_flow_hook_installed) return true;
+    resolve_all_game_addrs();
+    if (!g_addrs.flow_link) { swofty::log("[instant-race] flow hook: flow_link address not resolved"); return false; }
+
+    uint8_t *target = reinterpret_cast<uint8_t *>(g_addrs.flow_link);
+    if (!swofty::mem::readable(target, 16)) { swofty::log("[instant-race] flow hook: target %p not readable", target); return false; }
+
+    if (target[0] != 0x8B || target[1] != 0x44 || target[2] != 0x24 || target[3] != 0x40 ||
+        target[4] != 0x39 || target[5] != 0x05) {
+        swofty::log("[instant-race] Unexpected bytes at flow_link (%02X %02X %02X %02X %02X %02X)",
+                    target[0], target[1], target[2], target[3], target[4], target[5]);
+        return false;
+    }
+
+    int32_t orig_disp = *reinterpret_cast<int32_t *>(target + 6);
+    uintptr_t rip_after = reinterpret_cast<uintptr_t>(target + 10);
+    uintptr_t g_stay_addr = rip_after + orig_disp;
+
+    constexpr uintptr_t kRange = 0x70000000ULL; // stays inside rel32 reach with margin
+    uintptr_t search_start = (reinterpret_cast<uintptr_t>(target) > kRange + 0x10000ULL)
+        ? (reinterpret_cast<uintptr_t>(target) - kRange) : 0x10000ULL;
+    uint8_t *stub = nullptr;
+    for (uintptr_t addr = search_start; addr < reinterpret_cast<uintptr_t>(target) + kRange; addr += 0x10000) {
+        stub = static_cast<uint8_t *>(VirtualAlloc(reinterpret_cast<void *>(addr), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (stub) break;
+    }
+    if (!stub) { swofty::log("[instant-race] flow hook: no stub memory near %p", target); return false; }
+
+    size_t p = 0;
+    stub[p++] = 0x8B; stub[p++] = 0x54; stub[p++] = 0x24; stub[p++] = 0x40;
+    stub[p++] = 0x51;
+    stub[p++] = 0x41; stub[p++] = 0x50;
+    stub[p++] = 0x41; stub[p++] = 0x51;
+    stub[p++] = 0x41; stub[p++] = 0x52;
+    stub[p++] = 0x41; stub[p++] = 0x53;
+    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xEC; stub[p++] = 0x28;
+    stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xF9;
+    stub[p++] = 0x48; stub[p++] = 0xB8;
+    uint64_t fn_addr = reinterpret_cast<uint64_t>(&on_flow_link_check);
+    std::memcpy(stub + p, &fn_addr, 8); p += 8;
+    stub[p++] = 0xFF; stub[p++] = 0xD0;
+    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xC4; stub[p++] = 0x28;
+    stub[p++] = 0x41; stub[p++] = 0x5B;
+    stub[p++] = 0x41; stub[p++] = 0x5A;
+    stub[p++] = 0x41; stub[p++] = 0x59;
+    stub[p++] = 0x41; stub[p++] = 0x58;
+    stub[p++] = 0x59;
+    stub[p++] = 0x89; stub[p++] = 0x44; stub[p++] = 0x24; stub[p++] = 0x40;
+    stub[p++] = 0x39; stub[p++] = 0x05;
+    int32_t new_disp = static_cast<int32_t>(g_stay_addr - reinterpret_cast<uintptr_t>(stub + p + 4));
+    std::memcpy(stub + p, &new_disp, 4); p += 4;
+    stub[p++] = 0xE9;
+    int32_t jmp_back = static_cast<int32_t>(rip_after - reinterpret_cast<uintptr_t>(stub + p + 4));
+    std::memcpy(stub + p, &jmp_back, 4); p += 4;
+
+    DWORD old_prot = 0;
+    if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &old_prot)) { swofty::log("[instant-race] flow hook: VirtualProtect failed"); return false; }
+    target[0] = 0xE9;
+    int32_t jmp_stub = static_cast<int32_t>(reinterpret_cast<uintptr_t>(stub) - reinterpret_cast<uintptr_t>(target + 5));
+    std::memcpy(target + 1, &jmp_stub, 4);
+    for (int i = 5; i < 10; ++i) target[i] = 0x90;
+    VirtualProtect(target, 16, old_prot, &old_prot);
+    FlushInstructionCache(GetCurrentProcess(), target, 16);
+
+    init_ui_route_hooks();
+    g_flow_hook_installed = true;
+    swofty::log("[instant-race] Installed flow link hook at %p -> stub %p", target, stub);
+    return true;
+}
+
+// --- Direct Grand Prix Weekend Construction ---
+void *registry_call(uint8_t *entity, size_t slot, const void *a2, int a3) {
+    if (!entity || !a2) return nullptr;
+    auto *reg = entity + ENTITY_REGISTRY;
+    if (!swofty::mem::readable(reg, 8)) return nullptr;
+    auto **vt = *reinterpret_cast<void ***>(reg);
+    if (!vt || !swofty::mem::readable(vt, slot + 8)) return nullptr;
+    return reinterpret_cast<void *(*)(void *, const void *, int)>(vt[slot / 8])(reg, a2, a3);
+}
+
+uint8_t *current_weekend(void *modes) {
+    uint8_t *holder = nullptr, *entity = nullptr, *champ = nullptr, *sb = nullptr, *se = nullptr, *season = nullptr,
+            **wb = nullptr, **we = nullptr, *wk = nullptr;
+    uint32_t si = 0, wi = 0;
+    if (!rd(modes, 0x88, holder) || !rd(holder, 0x260, entity) || !rd(entity, 0x1058, champ) ||
+        !rd(champ, 0x548, sb) || !rd(champ, 0x550, se) || !rd(champ, 0x560, si) || se <= sb ||
+        si >= size_t(se - sb) / 16 || !rd(sb, size_t(si) * 16 + 8, season) || !rd(season, 0x288, wb) ||
+        !rd(season, 0x290, we) || !rd(season, 0x2a0, wi) || we <= wb || wi >= size_t(we - wb) ||
+        !rd(wb, size_t(wi) * 8, wk) || !swofty::mem::readable(wk, 0x280)) {
+        return nullptr;
+    }
+    return wk;
+}
+
+void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, const std::string &want_driver) {
+    auto **begin = reinterpret_cast<uint8_t **>(e + ENTITY_ENTRANTS);
+    if (!begin[0] || !begin[1] || begin[1] <= begin[0]) return;
+    size_t n = size_t(begin[1] - begin[0]) / ENTRANT_SIZE;
+    if (!n) return;
+
+    std::map<uint32_t, std::string> teams, drivers;
+    if (swofty::db::available()) {
+        swofty::db::Cursor c{};
+        if (swofty::db::open("entrants.teams", &c) == swofty::db::Result::ok) {
+            do {
+                const char *m = swofty::db::row_name(&c);
+                int64_t sid = -1;
+                if (m && cursor_int(&c, "stat_id", sid) && sid >= 0)
+                    teams[uint32_t(sid)] = m;
+            } while (swofty::db::step(&c) == swofty::db::Result::ok);
+        }
+        if (swofty::db::open("entrants.drivers", &c) == swofty::db::Result::ok) {
+            do {
+                const char *m = swofty::db::row_name(&c);
+                int64_t sid = -1;
+                if (m && cursor_int(&c, "stat_id", sid) && sid >= 0)
+                    drivers[uint32_t(sid)] = m;
+            } while (swofty::db::step(&c) == swofty::db::Result::ok);
+        }
+    }
+
+    auto match_str = [](const std::string &hay, const std::string &needle) {
+        if (needle.empty()) return true;
+        if (hay == needle) return true;
+        return hay.find(needle) != std::string::npos;
+    };
+
+    uint8_t *seat = nullptr;
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+        bool human = (r[0x4b] & 0x10) != 0;
+        std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
+        std::string d_str = r[0x50] ? "" : drivers[*reinterpret_cast<uint16_t *>(r + 0x52)];
+        if (!seat && !human && match_str(t_str, want_team) && match_str(d_str, want_driver)) {
+            seat = r;
+        }
+    }
+    if (!seat) {
+        for (size_t i = 0; i < n; ++i) {
+            uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+            std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
+            if (match_str(t_str, want_team)) {
+                seat = r;
+                break;
+            }
+        }
+    }
+    if (!seat) {
+        // The wanted team id may carry a different season prefix than the list that was loaded
+        // (f1cg_f1_2017_haas-ferrari vs sw_f1_2017_haas-ferrari): match on the part after the year.
+        std::string tail = want_team;
+        size_t us = std::string::npos;
+        for (size_t k = 0; k + 5 < tail.size(); ++k) {
+            if (tail[k] == '2' && tail[k + 1] == '0' && std::isdigit(static_cast<unsigned char>(tail[k + 2])) &&
+                std::isdigit(static_cast<unsigned char>(tail[k + 3])) && tail[k + 4] == '_') {
+                us = k + 5;
+                break;
+            }
+        }
+        if (us != std::string::npos) {
+            tail = tail.substr(us);
+            for (size_t i = 0; i < n && !seat; ++i) {
+                uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+                std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
+                if (!tail.empty() && t_str.find(tail) != std::string::npos && !(r[0x4b] & 0x10)) seat = r;
+            }
+        }
+    }
+    if (!seat) {
+        // Token match: f1cg_f1_2019_scuderia_toro_rosso-honda -> tokens {scuderia,toro,rosso,honda};
+        // pick the entrant team string containing the most tokens (>=4 chars), ignoring generic ones.
+        std::string tail = want_team;
+        for (size_t k = 0; k + 5 < tail.size(); ++k) {
+            if (tail[k] == '2' && tail[k + 1] == '0' && std::isdigit(static_cast<unsigned char>(tail[k + 2])) &&
+                std::isdigit(static_cast<unsigned char>(tail[k + 3])) && tail[k + 4] == '_') { tail = tail.substr(k + 5); break; }
+        }
+        std::vector<std::string> toks;
+        std::string cur;
+        for (char ch : tail + "_") {
+            if (ch == '_' || ch == '-' || ch == ' ') { if (cur.size() >= 4) toks.push_back(cur); cur.clear(); }
+            else cur += char(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        int best = 0;
+        for (size_t i = 0; i < n; ++i) {
+            uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+            if (r[0x4b] & 0x10) continue;
+            std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
+            {
+                std::string nn;
+                for (char c : t_str) if (std::isalnum(static_cast<unsigned char>(c))) nn += char(std::tolower(static_cast<unsigned char>(c)));
+                t_str = nn;
+            }
+            int score = 0;
+            bool first_tok = true;
+            for (auto &tk : toks) {
+                if (tk == "scuderia" || tk == "racing" || tk == "team") continue;
+                // The first real token is the team (williams, mclaren...); later ones are usually the engine
+                // supplier (mercedes, renault, honda...), which must not outweigh the team name.
+                int w = first_tok ? 3 : 1;
+                first_tok = false;
+                if (t_str.find(tk) != std::string::npos) score += w;
+            }
+            {
+                std::string nt;
+                for (char c : tail) if (std::isalnum(static_cast<unsigned char>(c))) nt += char(std::tolower(static_cast<unsigned char>(c)));
+                if (nt.size() >= 4 && t_str.find(nt) != std::string::npos) score += 3;
+            }
+            if (score > best) { best = score; seat = r; }
+        }
+        if (!seat) {
+            // Swofty season lists put Marussia/Manor/Virgin in the Haas slot (e.g. sw13_haas).
+            bool backmarker = false;
+            for (auto &tk : toks) if (tk == "marussia" || tk == "manor" || tk == "virgin") backmarker = true;
+            for (size_t i = 0; backmarker && i < n && !seat; ++i) {
+                uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+                if (r[0x4b] & 0x10) continue;
+                std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
+                if (t_str.find("haas") != std::string::npos) seat = r;
+            }
+        }
+        std::string all;
+        for (size_t i = 0; i < n; ++i) {
+            uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+            all += (all.empty() ? "" : ", ") + (r[0x58] ? std::string("?") : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)]);
+        }
+        ilog("[instant-race] Team token match for '%s': %s; entrant teams: %s", want_team.c_str(),
+             seat ? "found" : "none", all.c_str());
+    }
+    if (!seat) seat = begin[0];
+
+    alignas(16) uint8_t id[0x40]{};
+    void *users = mgr ? *reinterpret_cast<void **>(static_cast<uint8_t *>(mgr) + 0x140) : nullptr;
+    void *user = users && swofty::mem::readable(users, 0x1c8) ? *reinterpret_cast<void **>(static_cast<uint8_t *>(users) + 0x1c0) : nullptr;
+    void *prof = user && swofty::mem::readable(user, 0x1c8) ? *reinterpret_cast<void **>(static_cast<uint8_t *>(user) + 0x1c0) : nullptr;
+    if (!prof) return;
+
+    reinterpret_cast<void (*)(void *, void *)>((*reinterpret_cast<void ***>(prof))[0x38 / 8])(prof, id);
+    void *bus = g_addrs.message_bus ? *reinterpret_cast<void **>(g_addrs.message_bus) : nullptr;
+    void *mb = bus && swofty::mem::readable(bus, 0x10) ? *reinterpret_cast<void **>(static_cast<uint8_t *>(bus) + 8) : nullptr;
+    alignas(16) void *msg[3] = {reinterpret_cast<void *>(g_addrs.vt_msg_begin), nullptr, nullptr};
+    if (mb && g_addrs.post_begin && g_addrs.vt_msg_begin) {
+        reinterpret_cast<void (*)(void *, void *)>(g_addrs.post_begin)(mb, msg);
+    }
+
+    e[0x2f8] = 1;
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+        if (r != seat && (r[0x4b] & 0x10)) {
+            *reinterpret_cast<uint32_t *>(r + 0x48) &= ~0x10000000u;
+        }
+    }
+    std::memcpy(seat + 8, id, 0x40);
+    *reinterpret_cast<uint32_t *>(seat + 0x48) = 0x10000000;
+
+    msg[0] = reinterpret_cast<void *>(g_addrs.vt_msg_end);
+    msg[1] = nullptr;
+    msg[2] = e + 0x2d8;
+    if (mb && g_addrs.post_end && g_addrs.vt_msg_end) {
+        reinterpret_cast<void (*)(void *, void *)>(g_addrs.post_end)(mb, msg);
+    }
+    e[0x2f8] = 0;
+    size_t seat_idx = size_t(seat - begin[0]) / ENTRANT_SIZE;
+    std::string chosen_t = seat[0x58] ? "?" : teams[*reinterpret_cast<uint16_t *>(seat + 0x5a)];
+    std::string chosen_d = seat[0x50] ? "?" : drivers[*reinterpret_cast<uint16_t *>(seat + 0x52)];
+    ilog("[instant-race] Seated player in seat %zu/%zu: team=%s, driver=%s (wanted team=%s, driver=%s)",
+         seat_idx, n, chosen_t.c_str(), chosen_d.c_str(), want_team.c_str(), want_driver.c_str());
+}
+
+bool build_grand_prix_weekend(const RaceConfig &cfg) {
+    resolve_all_game_addrs();
+
+    if (!g_addrs.game_manager || !g_addrs.set_mode || !g_addrs.mode_by_predicate || !g_addrs.gp_predicate) {
+        swofty::log("[instant-race] Missing core game manager / mode signatures");
+        swofty::overlay::ui::toast(g_ui_state, "Instant Race: Core game signatures not found on this build.");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    void *mgr = nullptr;
+    if (!rd(reinterpret_cast<void *>(g_addrs.game_manager), 0, mgr) || !mgr) {
+        swofty::log("[instant-race] g_Game_Manager is null");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+    void *modes = nullptr;
+    if (!rd(mgr, MANAGER_MODES, modes) || !modes) {
+        swofty::log("[instant-race] GameModes manager is null");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    void *pred = reinterpret_cast<void *>(g_addrs.gp_predicate);
+    uint8_t *e = reinterpret_cast<ModeByPredicateFn *>(g_addrs.mode_by_predicate)(modes, &pred);
+    if (!e || !swofty::mem::readable(e, ENTITY_TRACKS + 8)) {
+        swofty::log("[instant-race] Grand Prix mode entity not found");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    int st = g_stage.load();
+    if (st == static_cast<int>(LaunchStage::set_mode)) {
+        reinterpret_cast<SetModeFn *>(g_addrs.set_mode)(modes, *reinterpret_cast<void **>(e + ENTITY_MODE));
+        g_stage_ts = GetTickCount64();
+        g_stage.store(static_cast<int>(LaunchStage::wait_rounds));
+        swofty::log("[instant-race] Set Grand Prix mode current; waiting for rounds component...");
+        return false;
+    }
+
+    if (!g_addrs.rounds_component || !g_addrs.set_setup_mode ||
+        !g_addrs.rounds_clear || !g_addrs.add_track || !g_addrs.build_season || !g_addrs.fill_entrants) {
+        ilog("[instant-race] Missing Grand Prix weekend setup signatures on this build (rounds_clear=%p add_track=%p build_season=%p fill_entrants=%p)",
+             (void *)g_addrs.rounds_clear, (void *)g_addrs.add_track, (void *)g_addrs.build_season, (void *)g_addrs.fill_entrants);
+        diag_find_functions("launch");
+        swofty::overlay::ui::toast(g_ui_state, "Instant Race: Update F1 25 to 1.0.145 for full GP launch support.");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    uint8_t *es = *reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(mgr) + MANAGER_ENTRANTS);
+    auto *lists = *reinterpret_cast<uint8_t **>(es + ES_LISTS);
+    auto *lists_end = *reinterpret_cast<uint8_t **>(es + ES_LISTS + 8);
+    size_t list_count = (lists && lists_end > lists) ? size_t(lists_end - lists) / 16 : 0;
+
+    std::string resolved_list_name;
+    uint8_t resolved_list_id = 0xff;
+    auto read_db_int = [](const std::string &key, int64_t &out) -> bool {
+        swofty::db::Value v{};
+        if (swofty::db::get(key, &v) != swofty::db::Result::ok) return false;
+        if (v.tag == SWOFTY_DB_INT || v.tag == SWOFTY_DB_ID || v.tag == SWOFTY_DB_ENUM) {
+            out = v.i;
+            return true;
+        }
+        if (v.tag == SWOFTY_DB_STRING && v.s && *v.s) {
+            char *endp = nullptr;
+            long long parsed = std::strtoll(v.s, &endp, 10);
+            if (endp != v.s) {
+                out = parsed;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto resolve_list_by_name = [&](const std::string &target_name) -> void * {
+        if (target_name.empty() || !lists || !list_count || !swofty::db::available()) return nullptr;
+        int64_t count = 0;
+        read_db_int("entrants.entrant_lists._entrant_list_instancecount_", count);
+        for (int64_t i = 0; i < count && i < 4096; ++i) {
+            std::string row = "entrants.entrant_lists.entrant_list_" + std::to_string(i);
+            swofty::db::Value meta_v{};
+            if (swofty::db::get(row + "._metadata_", &meta_v) != swofty::db::Result::ok ||
+                meta_v.tag != SWOFTY_DB_STRING || !meta_v.s) {
+                continue;
+            }
+            if (target_name == meta_v.s) {
+                int64_t sid = -1;
+                bool have_sid = read_db_int(row + ".stat_id", sid);
+                ilog("[instant-race] list lookup '%s': row=%s stat_id=%s%lld list_count=%zu ptr=%p",
+                     target_name.c_str(), row.c_str(), have_sid ? "" : "(unreadable) ", (long long)sid, list_count,
+                     (have_sid && sid >= 0 && size_t(sid) < list_count) ? *reinterpret_cast<void **>(lists + size_t(sid) * 16 + 8) : nullptr);
+                if (have_sid && sid >= 0 && size_t(sid) < list_count) {
+                    void *p = *reinterpret_cast<void **>(lists + size_t(sid) * 16 + 8);
+                    if (p) {
+                        resolved_list_name = target_name;
+                        resolved_list_id = static_cast<uint8_t>(sid);
+                        return p;
+                    }
+                }
+                break;
+            }
+        }
+        return nullptr;
+    };
+
+    {
+        // Diagnostic: which entrant lists exist and which of them the game has loaded.
+        int64_t cnt = 0;
+        read_db_int("entrants.entrant_lists._entrant_list_instancecount_", cnt);
+        ilog("[instant-race] entrant lists in DB: %lld, loaded slots in EntrantsSystem: %zu", (long long)cnt, list_count);
+        for (int64_t i = 0; i < cnt && i < 200; ++i) {
+            std::string row = "entrants.entrant_lists.entrant_list_" + std::to_string(i);
+            swofty::db::Value mv{};
+            int64_t sid = -1;
+            if (swofty::db::get(row + "._metadata_", &mv) != swofty::db::Result::ok || mv.tag != SWOFTY_DB_STRING || !mv.s) continue;
+            std::string nm = mv.s;
+            if (nm.find("f1_20") == std::string::npos && nm.find("sw_") == std::string::npos) continue;
+            bool ok = read_db_int(row + ".stat_id", sid);
+            void *pp = (ok && sid >= 0 && size_t(sid) < list_count) ? *reinterpret_cast<void **>(lists + size_t(sid) * 16 + 8) : nullptr;
+        }
+    }
+
+    void *list = resolve_list_by_name(cfg.era_id);
+    if (!list && cfg.era_id.starts_with("f1cg_f1_")) {
+        std::string yr = cfg.era_id.substr(8);
+        // The Swofty season's loaded list is named sw_f1_<year>; the f1cg_f1_<year> list is not loaded by the game.
+        list = resolve_list_by_name("sw_f1_" + yr);
+        if (!list) list = resolve_list_by_name("sw_" + yr);
+        if (!list) list = resolve_list_by_name("f1_" + yr);
+    }
+    if (!list && cfg.era_id.starts_with("f1_") && cfg.era_id.size() == 7) {
+        // e.g. f1_2024 is in the DB but not loaded; the Swofty season list sw_f1_2024 is.
+        list = resolve_list_by_name("sw_" + cfg.era_id);
+    }
+    if (!list) {
+        ilog("[instant-race] Warning: era list '%s' not found via list_stat_id; falling back to f1_2025", cfg.era_id.c_str());
+        list = resolve_list_by_name("f1_2025");
+    }
+    if (!list && list_count > 0) {
+        for (size_t i = 0; i < list_count; ++i) {
+            void *p = *reinterpret_cast<void **>(lists + i * 16 + 8);
+            if (p) {
+                list = p;
+                resolved_list_name = "slot_" + std::to_string(i);
+                resolved_list_id = static_cast<uint8_t>(i);
+                break;
+            }
+        }
+    }
+    if (!list) {
+        ilog("[instant-race] No loaded entrant list found in EntrantsSystem (%zu slots)", list_count);
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+    ilog("[instant-race] Resolved entrant list '%s' -> '%s' (stat_id=%u, ptr=%p)",
+         cfg.era_id.c_str(), resolved_list_name.c_str(), unsigned(resolved_list_id), list);
+
+    auto **evt = *reinterpret_cast<void ***>(e);
+    auto *modes_vec = reinterpret_cast<uint8_t *(*)(void *)>(evt[0x1d0 / 8])(e);
+    uint8_t *picked_gsm = nullptr;
+    uint8_t *fallback_gsm = nullptr;
+    for (auto **p = *reinterpret_cast<uint8_t ***>(modes_vec + 8), **end = *reinterpret_cast<uint8_t ***>(modes_vec + 0x10);
+         p && p != end; ++p) {
+        uint8_t *m = *p;
+        void *holder = m && swofty::mem::readable(m, 0xe0) ? *reinterpret_cast<void **>(m + 0xd8) : nullptr;
+        const char *name = holder ? *reinterpret_cast<const char **>(static_cast<uint8_t *>(holder) + 0x10) : nullptr;
+        if (!name) continue;
+        if (std::strcmp(name, "swofty_f1") == 0) fallback_gsm = m;
+
+        int64_t setups = *reinterpret_cast<int64_t *>(m + 0x70);
+        for (int64_t i = 0; i < setups && i < 12 && !picked_gsm; ++i) {
+            uint8_t *esm = *reinterpret_cast<uint8_t **>(m + 0x10 + size_t(i) * 8);
+            if (!esm || !swofty::mem::readable(esm, 0x238)) continue;
+            int64_t n = *reinterpret_cast<int64_t *>(esm + 0x230);
+            for (int64_t k = 0; k < n && k < 32; ++k) {
+                if (*reinterpret_cast<void **>(esm + 0x130 + size_t(k) * 8) == list) {
+                    picked_gsm = m;
+                    break;
+                }
+            }
+        }
+    }
+    uint8_t *gsm = picked_gsm ? picked_gsm : fallback_gsm;
+    if (!gsm) {
+        swofty::log("[instant-race] No compatible GameSetupMode found");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    // 1. Set GameSetupMode & EntrantList BEFORE querying rounds_component (matches direct_start.cpp)
+    reinterpret_cast<void (*)(void *, void *, int)>(g_addrs.set_setup_mode)(e, gsm, 0);
+    *reinterpret_cast<void **>(e + ENTITY_LIST) = list;
+
+    void *rounds = registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.rounds_component), 0);
+    if (!rounds) {
+        if (GetTickCount64() - g_stage_ts > 8000) {
+            swofty::log("[instant-race] Timeout waiting for Grand Prix rounds component");
+            g_stage.store(static_cast<int>(LaunchStage::idle));
+        }
+        return false;
+    }
+
+    uint8_t *tracks = *reinterpret_cast<uint8_t **>(e + ENTITY_TRACKS);
+    uint8_t *track = nullptr;
+    if (tracks && swofty::mem::readable(tracks, 0x38)) {
+        for (auto *q = *reinterpret_cast<uint8_t **>(tracks + 0x28), *qend = *reinterpret_cast<uint8_t **>(tracks + 0x30);
+             q && q < qend; q += 16) {
+            auto *rec = *reinterpret_cast<uint8_t **>(q + 8);
+            const char *name = rec && swofty::mem::readable(rec, 0x80) ? *reinterpret_cast<const char **>(rec + 0x78) : nullptr;
+            if (name && cfg.track_id == name) {
+                track = rec;
+                break;
+            }
+        }
+    }
+    if (!track) {
+        ilog("[instant-race] Track '%s' not found in Grand Prix track system - aborting launch", cfg.track_id.c_str());
+        swofty::overlay::ui::toast(g_ui_state, "Track '" + cfg.track_label + "' not mounted yet - reroll track!");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    reinterpret_cast<void (*)(void *, void *)>(g_addrs.rounds_clear)(nullptr, static_cast<uint8_t *>(rounds) + 0x298);
+    reinterpret_cast<void (*)(void *, void *)>(g_addrs.add_track)(rounds, track);
+
+    alignas(16) static uint8_t stub[0x400], holder[0x40];
+    std::memset(stub, 0, sizeof(stub));
+    std::memset(holder, 0, sizeof(holder));
+    *reinterpret_cast<void **>(stub + 0x270) = e + ENTITY_REGISTRY;
+    *reinterpret_cast<void **>(stub + 0x290) = rounds;
+    *reinterpret_cast<void **>(holder + 0x18) = track;
+    *reinterpret_cast<void **>(stub + 0x298) = holder;
+    reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
+
+    g_track_stat.store(track[1]);
+    uint8_t *wk = current_weekend(modes);
+    if (wk) wk[WK_TRACK] = track[1];
+    else ilog("[instant-race] current weekend not readable after season build (will retry at load)");
+
+    if (evt && swofty::mem::readable(evt, 0xf0)) {
+        reinterpret_cast<void (*)(void *)>(evt[0xe8 / 8])(e);
+    }
+    void *alloc = nullptr, *cur_gsm = nullptr;
+    rd(rounds, 0x210, alloc);
+    rd(e, 0x2b0, cur_gsm);
+    void *svc = g_addrs.weekend_service
+        ? registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)
+        : nullptr;
+    uint64_t race_kind = 3;
+    {
+        char la[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la)) {
+            std::string f = std::string(la) + "\\Swofty\\instant_race_kind7.txt";
+            if (GetFileAttributesA(f.c_str()) != INVALID_FILE_ATTRIBUTES) race_kind = 7;
+        }
+        ilog("[instant-race] Weekend race kind = %llu", (unsigned long long)race_kind);
+    }
+    if (alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8)) {
+        alignas(16) uint8_t wlist[0x38]{};
+        *reinterpret_cast<void **>(wlist + 8) = alloc;
+        *reinterpret_cast<void **>(wlist + 0x10) = alloc;
+        reinterpret_cast<void (*)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)>(
+            g_addrs.weekend_structure)(wlist, cur_gsm, 0, 0, race_kind, 0, 1, 0, 0);
+        auto **svt = *reinterpret_cast<void ***>(svc);
+        if (svt && swofty::mem::readable(svt, 0x270)) {
+            reinterpret_cast<void (*)(void *, void *, int)>(svt[0x268 / 8])(svc, wlist, 1);
+        }
+    }
+
+    alignas(16) static uint8_t blk[0x190];
+    std::memset(blk, 0, sizeof(blk));
+    *reinterpret_cast<uint64_t *>(blk + 0x180) = 1;
+    reinterpret_cast<void (*)(void *, void *, void *, int)>(g_addrs.fill_entrants)(es, e, blk, 0);
+    seat_player_on_grid(e, mgr, cfg.team_id, cfg.driver_id);
+
+    wk = current_weekend(modes);
+    if (!wk) ilog("[instant-race] current weekend not readable after entrants (will retry at load)");
+    if (wk && swofty::mem::readable(wk, WK_TRACK + 4)) {
+        wk[WK_TRACK] = track[1];
+        *reinterpret_cast<uint32_t *>(wk + WK_CURRENT) = 0;
+        uint8_t *sb = nullptr, *se = nullptr;
+        if (rd(wk, WK_SESSIONS, sb) && rd(wk, WK_SESSIONS + 8, se) && sb && se > sb && swofty::mem::readable(sb, SESSION_ID + 4)) {
+            uint32_t cur_sid = *reinterpret_cast<uint32_t *>(sb + SESSION_ID);
+            if (cur_sid < 15 || cur_sid > 17) {
+                *reinterpret_cast<uint32_t *>(sb + SESSION_ID) = 15;
+            }
+            ilog("[instant-race] Weekend session[0] id=%u (track_stat_id=%u)",
+                 *reinterpret_cast<uint32_t *>(sb + SESSION_ID), unsigned(wk[WK_TRACK]));
+        }
+    }
+
+    ilog("[instant-race] Grand Prix weekend built: era=%s, track=%s, team=%s, driver=%s, laps=%.0f",
+         cfg.era_id.c_str(), cfg.track_id.c_str(), cfg.team_id.c_str(), cfg.driver_id.c_str(), cfg.laps);
+    return true;
+}
+
+void on_flow_frame(double, void *) {
+    static int hook_tries = 0;
+    static uint64_t hook_last = 0;
+    if (!g_flow_hook_installed && swofty::api && swofty::api->module_base() && hook_tries < 30 &&
+        GetTickCount64() - hook_last > 1000) {
+        hook_last = GetTickCount64();
+        ++hook_tries;
+        install_flow_hook();
+    }
+    int st = g_stage.load();
+    if (st == static_cast<int>(LaunchStage::leave_frontend) && GetTickCount64() - g_stage_ts > 60000) {
+        ilog("[instant-race] Timeout waiting for the menu to close (60 s)");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+    }
+}
+
+// --- AI difficulty -----------------------------------------------------------------------------------------------
+// The game keeps menu settings in its options store (g_Game_OptionsStore; layout as Swofty core's box_options.cpp:
+// entries at +0x288..+0x290 of 0x10 bytes with the option at +8; an option's values at +0x80..+0x88, 0x50 bytes each;
+// index get/set through vtable slots 2/3). The AI difficulty option is the one with 111 values (0..110). We set it to
+// the slider before the weekend is built and put the player's own value back when the session ends.
+void *g_ai_option = nullptr;
+int g_ai_saved_index = -1;
+
+bool ai_code_ptr(const void *p) {
+    auto a = reinterpret_cast<uintptr_t>(p);
+    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
+    return p && base && a >= base && a < base + 0x20000000 && swofty::mem::readable(p, 1);
+}
+void *ai_vfunc(const void *obj, size_t slot) {
+    if (!swofty::mem::readable(obj, 8)) return nullptr;
+    auto **vt = *static_cast<void **const *>(obj);
+    if (!swofty::mem::readable(vt, (slot + 1) * 8) || !ai_code_ptr(vt[slot])) return nullptr;
+    return vt[slot];
+}
+int ai_get_index(const void *opt) {
+    auto *get = reinterpret_cast<int (*)(const void *, void *)>(ai_vfunc(opt, 2));
+    if (!get) return -1;
+    uint64_t scratch[2] = {};
+    return get(opt, scratch);
+}
+bool ai_set_index(const void *opt, int idx) {
+    auto *set = reinterpret_cast<void (*)(const void *, int)>(ai_vfunc(opt, 3));
+    if (!set) return false;
+    set(opt, idx);
+    return true;
+}
+void *find_ai_difficulty_option() {
+    uintptr_t find = (swofty::api && swofty::api->resolve) ? swofty::api->resolve("Game_OptionsStore_FindOption") : 0;
+    uintptr_t slot = (swofty::api && swofty::api->resolve) ? swofty::api->resolve("g_Game_OptionsStore") : 0;
+    if (!find || !slot || !swofty::mem::readable(reinterpret_cast<void *>(slot), 8)) {
+        ilog("[instant-race] AI difficulty: options store not resolved on this build (find=%llx store=%llx)",
+             (unsigned long long)find, (unsigned long long)slot);
+        return nullptr;
+    }
+    auto *store = *reinterpret_cast<uint8_t **>(slot);
+    if (!store || !swofty::mem::readable(store, 0x298)) return nullptr;
+    auto *base = *reinterpret_cast<uint8_t **>(store + 0x288);
+    auto *end = *reinterpret_cast<uint8_t **>(store + 0x290);
+    if (!base || end <= base) return nullptr;
+    size_t count = size_t(end - base) / 0x10;
+    using FindFn = uint64_t(void *map, const char **name);
+    // Option names from the game's own strings, most likely first.
+    for (const char *nm : {"ai_difficulty", "ai_level", "difficulty", "aiDifficulty"}) {
+        const char *name = nm;
+        uint64_t idx = reinterpret_cast<FindFn *>(find)(store + 0x270, &name);
+        if (idx >= count) { ilog("[instant-race] AI difficulty: no option named %s", nm); continue; }
+        uint8_t *e = base + idx * 0x10;
+        auto *opt = swofty::mem::readable(e, 0x10) ? *reinterpret_cast<uint8_t **>(e + 8) : nullptr;
+        if (!opt || !swofty::mem::readable(opt, 0x90)) { ilog("[instant-race] AI difficulty: option %s unreadable", nm); continue; }
+        auto *v = *reinterpret_cast<uint8_t **>(opt + 0x80);
+        auto *ve = *reinterpret_cast<uint8_t **>(opt + 0x88);
+        size_t nvals = (v && ve > v && size_t(ve - v) % 0x50 == 0) ? size_t(ve - v) / 0x50 : 0;
+        int cur = ai_get_index(opt);
+        ilog("[instant-race] AI difficulty: option %s found (store index %llu, %zu listed values, current %d)", nm,
+             (unsigned long long)idx, nvals, cur);
+        if (cur >= 0) return opt;
+    }
+    return nullptr;
+}
+void apply_ai_difficulty(int want) {
+    void *opt = find_ai_difficulty_option();
+    if (!opt) { ilog("[instant-race] AI difficulty: option not found; the game's own setting is used"); return; }
+    int before = ai_get_index(opt);
+    if (before < 0) { ilog("[instant-race] AI difficulty: option has no readable index"); return; }
+    want = std::clamp(want, 0, 110);
+    {
+        auto *v = *reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(opt) + 0x80);
+        auto *ve = *reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(opt) + 0x88);
+        size_t nvals = (v && ve > v && size_t(ve - v) % 0x50 == 0) ? size_t(ve - v) / 0x50 : 0;
+        if (nvals > 1 && nvals < 111) {
+            // A short value list (e.g. preset levels): map 0..110 onto it rather than setting an index past its end.
+            int mapped = static_cast<int>(std::lround(want * double(nvals - 1) / 110.0));
+            ilog("[instant-race] AI difficulty: option has %zu values; slider %d maps to index %d", nvals, want, mapped);
+            want = mapped;
+        }
+    }
+    if (!ai_set_index(opt, want)) { ilog("[instant-race] AI difficulty: option has no setter"); return; }
+    if (!g_ai_option) { g_ai_option = opt; g_ai_saved_index = before; }
+    ilog("[instant-race] AI difficulty: %d -> %d (now reads %d)", before, want, ai_get_index(opt));
+}
+void restore_ai_difficulty() {
+    if (!g_ai_option || g_ai_saved_index < 0) return;
+    ai_set_index(g_ai_option, g_ai_saved_index);
+    ilog("[instant-race] AI difficulty put back to the player's %d", g_ai_saved_index);
+    g_ai_option = nullptr;
+    g_ai_saved_index = -1;
+}
+
+void on_session_start(const SwoftyEvent *, void *) {
+    g_in_session.store(true);
+    g_menu_open = false;
+}
+
+void on_session_end(const SwoftyEvent *, void *) {
+    restore_ai_difficulty();
+    g_stage.store(static_cast<int>(LaunchStage::idle));
+    g_load_sync_done = false;
+    g_fade_released = false;
+    g_scene_despawned = false;
+    g_load_exit_ts = 0;
+    g_load_sync_tries = 0;
+    g_chose_sess.store(false);
+    g_route_fired.store(false);
+    g_in_session.store(false);
+}
+
+uint32_t toggle_vk() {
+    std::string_view k = menu_key;
+    if (k == "F7") return VK_F7;
+    if (k == "F8") return VK_F8;
+    if (k == "F10") return VK_F10;
+    if (k == "Insert") return VK_INSERT;
+    if (k == "Home") return VK_HOME;
+    return VK_F7;
+}
+
+void trigger_launch() {
+    if (g_raced_once) {
+        ilog("[instant-race] Launch blocked: already raced this game session (restart required)");
+        swofty::overlay::ui::toast(g_ui_state, "Restart the game to start another Instant Race (known limitation).");
+        return;
+    }
+    if (g_cfg.surprise) randomize_all();
+    g_menu_open = false;
+    swofty::overlay::focus(false);
+    g_was_focused = false;
+    g_load_sync_done = false;
+    g_fade_released = false;
+    g_scene_despawned = false;
+    g_load_exit_ts = 0;
+    g_load_sync_tries = 0;
+    g_chose_sess.store(false);
+    g_route_fired.store(false);
+    g_session_at_ms.store(0);
+    g_session_visible.store(false);
+    g_last_fade_mask = ~0u;
+    g_last_fade_state = ~0u;
+    g_fade_log_count = 0;
+    ilog("[instant-race] v1.0.0 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
+    g_stage.store(static_cast<int>(LaunchStage::set_mode));
+    swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
+}
+
+bool is_main_menu_ready() {
+    if (g_in_session.load()) return false;
+    uint64_t seen = g_frontend_seen_ms.load();
+    return seen != 0 && (GetTickCount64() - seen) < 500;
+}
+
+void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
+    using namespace swofty::overlay;
+    auto in = input(paint);
+
+    bool on_home = is_main_menu_ready();
+
+    if (on_home && !g_initialized_roll && swofty::db::available()) {
+        std::lock_guard lock(g_mutex);
+        randomize_all();
+        g_initialized_roll = true;
+    }
+
+    if (on_home && in.key_pressed(toggle_vk())) {
+        g_menu_open = !g_menu_open;
+        if (g_menu_open && !g_initialized_roll) {
+            std::lock_guard lock(g_mutex);
+            randomize_all();
+            g_initialized_roll = true;
+        }
+    }
+
+    if (g_menu_open != g_was_focused) {
+        focus(g_menu_open);
+        g_was_focused = g_menu_open;
+    }
+
+    ui::Ui u(paint, g_ui_state);
+
+    uint64_t sat = g_session_at_ms.load();
+    int cur_launch_st = g_stage.load();
+    bool launching_now = (cur_launch_st != static_cast<int>(LaunchStage::idle) && cur_launch_st != static_cast<int>(LaunchStage::done));
+    if (launching_now || (sat && !g_session_visible.load() && (GetTickCount64() - sat) < 60000)) {
+        std::lock_guard lock(g_mutex);
+        float sw = 0, sh = 0;
+        size(paint, &sw, &sh);
+        rect(paint, 0, 0, sw, sh, 0x0B0D12FF);
+        Rect card{(sw - u.u(540.0f)) * 0.5f, (sh - u.u(210.0f)) * 0.5f, u.u(540.0f), u.u(210.0f)};
+        Rect body = ui::panel(u, card, "INSTANT RACE  -  LOADING GRAND PRIX");
+        char line1[256], line2[256], line3[256];
+        bool hide = g_cfg.surprise;
+        std::snprintf(line1, sizeof(line1), "Season / Era:   %s", hide ? "???" : g_cfg.era_label.c_str());
+        if (hide) std::snprintf(line2, sizeof(line2), "Car & Driver:   ???  -  Surprise!");
+        else std::snprintf(line2, sizeof(line2), "Car & Driver:   %s  -  %s", g_cfg.team_label.c_str(), g_cfg.driver_label.c_str());
+        std::snprintf(line3, sizeof(line3), "Circuit & Race: %s  |  %.0f Laps  |  %s",
+                      hide ? "???" : g_cfg.track_label.c_str(), g_cfg.laps, hide ? "???" : g_cfg.weather.c_str());
+        float ly = body.y + u.u(6.0f);
+        ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line1, u.th.text); ly += u.u(30.0f);
+        ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line2, u.th.text); ly += u.u(30.0f);
+        ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line3, u.th.text); ly += u.u(36.0f);
+        ui::label(u, {body.x, ly, body.w, u.u(24.0f)},
+                  sat ? "Lining up on the grid (broadcast intro)..." : "Building custom Grand Prix weekend...", u.th.dim);
+        return;
+    }
+
+    if (show_menu_prompt && on_home && !g_menu_open) {
+        float sw = 0, sh = 0;
+        size(paint, &sw, &sh);
+        Rect pill{sw - u.u(275.0f), u.u(138.0f), u.u(215.0f), u.u(38.0f)};
+        if (ui::button(u, pill, "[F7] Instant Race")) {
+            g_menu_open = true;
+            if (!g_initialized_roll) {
+                std::lock_guard lock(g_mutex);
+                randomize_all();
+                g_initialized_roll = true;
+            }
+            focus(true);
+            g_was_focused = true;
+        }
+    }
+
+    if (!g_menu_open) {
+        ui::draw_toasts(u);
+        return;
+    }
+
+    if (u.back) {
+        g_menu_open = false;
+        focus(false);
+        g_was_focused = false;
+        return;
+    }
+
+    float sw = 0, sh = 0;
+    size(paint, &sw, &sh);
+    float pw = std::min(sw * 0.78f, u.u(940.0f));
+    float ph = std::min(sh * 0.86f, u.u(680.0f));
+    Rect win{(sw - pw) * 0.5f, (sh - ph) * 0.5f, pw, ph};
+
+    rect(paint, 0, 0, sw, sh, 0x00000095);
+    Rect body = ui::panel(u, win, "INSTANT RACE  -  RANDOM GRAND PRIX GENERATOR");
+
+    std::lock_guard lock(g_mutex);
+
+    float y = body.y + u.u(6.0f);
+    float h = u.u(40.0f);
+    float gap = u.u(12.0f);
+    float reroll_w = u.u(150.0f);
+    float main_w = body.w - reroll_w - gap;
+
+    ui::label(u, {body.x, y, body.w - u.u(130.0f), u.u(26)},
+              "Rolled from your installed seasons, teams, drivers & tracks:", u.th.dim);
+    if (ui::button(u, {body.x + body.w - u.u(120.0f), y, u.u(120.0f), u.u(28)}, "Close [F7]")) {
+        g_menu_open = false;
+        focus(false);
+        g_was_focused = false;
+        return;
+    }
+    y += u.u(34.0f);
+
+    char buf[256];
+
+    if (g_cfg.surprise) {
+        ui::label(u, {body.x, y, body.w, h}, "SURPRISE MODE IS ON", u.th.text);
+        y += h + gap;
+        ui::label(u, {body.x, y, body.w, h}, "Era, car & driver, circuit and weather are picked at random when you press Start.", u.th.dim);
+        y += h + gap;
+        ui::label(u, {body.x, y, body.w, h}, "You'll find out what you got when the race loads. Your race length below still applies.", u.th.dim);
+        y += (h + gap) * 2;
+    } else {
+    // 1. Season / Era
+    std::snprintf(buf, sizeof(buf), "Season / Era:   %s", g_cfg.era_label.c_str());
+    if (ui::button(u, {body.x, y, main_w, h}, buf)) {
+        auto eras = get_installed_eras();
+        if (!eras.empty()) {
+            size_t idx = 0;
+            for (size_t i = 0; i < eras.size(); ++i)
+                if (eras[i].id == g_cfg.era_id) { idx = (i + 1) % eras.size(); break; }
+            g_cfg.era_id = eras[idx].id;
+            g_cfg.era_label = eras[idx].label;
+            g_cfg.era_row_index = eras[idx].row_index;
+            reroll_seat_for_current_era();
+        }
+    }
+    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Reroll Era")) {
+        reroll_era();
+    }
+    y += h + gap;
+
+    // 2. Team & Driver
+    std::snprintf(buf, sizeof(buf), "Car & Driver:   %s  -  %s", g_cfg.team_label.c_str(), g_cfg.driver_label.c_str());
+    if (ui::button(u, {body.x, y, main_w, h}, buf)) {
+        auto seats = get_seats_for_era(g_cfg.era_id, g_cfg.era_row_index);
+        if (!seats.empty()) {
+            size_t idx = 0;
+            for (size_t i = 0; i < seats.size(); ++i)
+                if (seats[i].team_id == g_cfg.team_id && seats[i].driver_id == g_cfg.driver_id) {
+                    idx = (i + 1) % seats.size();
+                    break;
+                }
+            g_cfg.team_id = seats[idx].team_id;
+            g_cfg.team_label = seats[idx].team_label;
+            g_cfg.driver_id = seats[idx].driver_id;
+            g_cfg.driver_label = seats[idx].driver_label;
+        }
+    }
+    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Reroll Seat")) {
+        reroll_seat_for_current_era();
+    }
+    y += h + gap;
+
+    // 3. Track
+    std::snprintf(buf, sizeof(buf), "Circuit:        %s", g_cfg.track_label.c_str());
+    if (ui::button(u, {body.x, y, main_w, h}, buf)) {
+        auto tracks = get_installed_tracks();
+        if (!tracks.empty()) {
+            size_t idx = 0;
+            for (size_t i = 0; i < tracks.size(); ++i)
+                if (tracks[i].id == g_cfg.track_id) { idx = (i + 1) % tracks.size(); break; }
+            g_cfg.track_id = tracks[idx].id;
+            g_cfg.track_label = tracks[idx].label;
+        }
+    }
+    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Reroll Track")) {
+        reroll_track();
+    }
+    y += h + gap;
+
+    // 4. Weather
+    std::snprintf(buf, sizeof(buf), "Weather:        %s", g_cfg.weather.c_str());
+    if (ui::button(u, {body.x, y, main_w, h}, buf)) {
+        g_cfg.weather = (g_cfg.weather == "Dry") ? "Wet" : "Dry";
+    }
+    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Flip Weather")) {
+        g_cfg.weather = (g_cfg.weather == "Dry") ? "Wet" : "Dry";
+    }
+    y += h + gap;
+
+    }
+
+    // 5. Sliders: Race Distance (1-50 Laps) & AI Difficulty (0-110)
+    float half_w = (body.w - gap) * 0.5f;
+    float slider_h = u.u(48.0f);
+    if (ui::slider(u, {body.x, y, half_w, slider_h}, "Race Distance", g_cfg.laps, 1.0f, 50.0f, "%.0f Laps")) {
+        g_cfg.laps = std::round(g_cfg.laps);
+    }
+    // The game's AI difficulty isn't set by the mod yet (its storage hasn't been found); races use the player's own
+    // Grand Prix setting, so say so instead of showing a slider that does nothing.
+    ui::label(u, {body.x + half_w + gap, y, half_w, slider_h * 0.5f}, "AI Difficulty: your Grand Prix setting", u.th.text);
+    ui::label(u, {body.x + half_w + gap, y + slider_h * 0.5f, half_w, slider_h * 0.5f},
+              "Change it in Grand Prix > Settings > Difficulty", u.th.dim);
+    y += slider_h + gap * 1.3f;
+
+    // 6. Roll All & Launch Buttons
+    float roll_w = u.u(230.0f);
+    if (ui::button(u, {body.x, y, roll_w, u.u(50.0f)}, "Roll All Random")) {
+        randomize_all();
+        ui::toast(g_ui_state, "Rolled a brand new random Grand Prix!");
+    }
+    if (ui::button(u, {body.x + roll_w + gap, y, roll_w, u.u(50.0f)}, g_cfg.surprise ? "Surprise: ON" : "Surprise: OFF")) {
+        g_cfg.surprise = !g_cfg.surprise;
+        ui::toast(g_ui_state, g_cfg.surprise ? "Surprise mode on: everything but race length is a mystery." : "Surprise mode off.");
+    }
+    if (ui::button(u, {body.x + (roll_w + gap) * 2, y, body.w - (roll_w + gap) * 2, u.u(50.0f)}, "START INSTANT RACE")) {
+        trigger_launch();
+    }
+
+    ui::draw_toasts(u);
+}
+
+bool init_plugin() {
+    if (!swofty::api || !swofty::api->resolve) return true;
+
+    for (const char *sym : {"Game_ChampionshipGameMode_BuildSessionSettings", "game.championship_game_mode_build_session_settings"}) {
+        if (swofty::api->resolve(sym) != 0) {
+            swofty::detail::append(swofty::detail::mixins,
+                new swofty::detail::node{
+                    {sym, SWOFTY_MIXIN_WRAP, 0,
+                     reinterpret_cast<void *>(&hook_build_settings),
+                     reinterpret_cast<void **>(&orig_build_settings)},
+                    nullptr});
+            break;
+        }
+    }
+
+    for (const char *sym : {"Sess_Weather_PickRandomType", "session.weather_pick_random_type"}) {
+        if (swofty::api->resolve(sym) != 0) {
+            swofty::detail::append(swofty::detail::mixins,
+                new swofty::detail::node{
+                    {sym, SWOFTY_MIXIN_WRAP, 0,
+                     reinterpret_cast<void *>(&hook_weather_pick),
+                     reinterpret_cast<void **>(&orig_weather_pick)},
+                    nullptr});
+            break;
+        }
+    }
+
+    if (swofty::api->resolve("FeHome_Handle_Command") != 0) {
+        swofty::detail::append(swofty::detail::mixins,
+            new swofty::detail::node{
+                {"FeHome_Handle_Command", SWOFTY_MIXIN_WRAP, 0,
+                 reinterpret_cast<void *>(&fehome_cmd_detour),
+                 reinterpret_cast<void **>(&orig_fehome_cmd)},
+                nullptr});
+    }
+    if (swofty::api->resolve("Vm_Fire_Route") != 0) {
+        swofty::detail::append(swofty::detail::mixins,
+            new swofty::detail::node{
+                {"Vm_Fire_Route", SWOFTY_MIXIN_WRAP, 0,
+                 reinterpret_cast<void *>(&fire_route_detour),
+                 reinterpret_cast<void **>(&orig_fire_route)},
+                nullptr});
+    }
+    if (swofty::api->resolve("Game_F1WorldActivityContainer_HandleCommand") != 0) {
+        swofty::detail::append(swofty::detail::mixins,
+            new swofty::detail::node{
+                {"Game_F1WorldActivityContainer_HandleCommand", SWOFTY_MIXIN_WRAP, 0,
+                 reinterpret_cast<void *>(&container_cmd_detour),
+                 reinterpret_cast<void **>(&orig_container_cmd)},
+                nullptr});
+    }
+
+    return true;}
+
+} // namespace
+
+SWOFTY_ON_LOAD {
+    swofty::events::subscribe(SWOFTY_EVENT_SESSION_START, on_session_start);
+    swofty::events::subscribe(SWOFTY_EVENT_SESSION_END, on_session_end);
+    swofty::events::on_frame(&on_flow_frame);
+    if (swofty::overlay::available()) {
+        swofty::overlay::on_paint(&on_paint_overlay);
+    }
+    swofty::log("[instant-race] v1.0.0 loaded! Press F7 on the main menu to open Instant Race.");
+}
+
+SWOFTY_ADDON(init_plugin)
