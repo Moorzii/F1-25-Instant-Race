@@ -2,6 +2,15 @@
 
 Planned work, roughly in order. Notes under each item are where to start.
 
+## 0. Ghost grid on the first load (intermittent)
+On a profile that never played a Grand Prix, cars sometimes spawn inside each other when the race first loads;
+restarting the session always fixes it. 1.0.3 fixed the missing race session (the weekend is laid out again with
+Sess_WeekendSetup_LayoutWeekends), but not this.
+- Game_GridSetup_SetupStartingGrid / DriverBasedGrid run once at the load (their 32-byte output stays 0xff on good
+  and bad loads alike) and not at all on a restart, so the placement comes from somewhere else.
+- Next: trace the per-car placement (Game_GridSlot_PlaceVehicle, Game_VehiclePlacementSystem) on a ghosted first
+  load and on the restart, and compare.
+
 ## 1. Time of day
 Let players pick the race start time (or random).
 - Same hook as the weather fix: `Sess_GameWeatherSystem_SetupSession` reads `WeatherSessionSettings`.
@@ -33,7 +42,6 @@ Option to choose where the player starts (P1 to the back), or random.
 - Swofty docs: `session.grid.build` event (`Game_GridSetup_SetupStartingGrid`) and the grid placement functions in `std/systems/sessions`.
 
 ## Smaller items
-- Ultrawide / triple screens: the "[F7] Instant Race" prompt is drawn at the far right of the whole display, while the game draws its menus in a centred 16:9 area (seen on 7680x1440). Anchor the prompt (and check the menu panel and loading card) to that centred 16:9 area: when width/height > 16/9, use x0 = (width - height*16/9) / 2 and w = height*16/9.
+- (Done in 1.0.3) Ultrawide / triple screens: the "[F7] Instant Race" prompt is drawn at the far right of the whole display, while the game draws its menus in a centred 16:9 area (seen on 7680x1440). Anchor the prompt (and check the menu panel and loading card) to that centred 16:9 area: when width/height > 16/9, use x0 = (width - height*16/9) / 2 and w = height*16/9.
 - Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`).
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.
-- Remove the old `Sess_Weather_PickRandomType` hook, which never fires.

@@ -436,10 +436,8 @@ std::mt19937 g_rng{static_cast<unsigned>(GetTickCount64())};
 using ModeByPredicateFn = uint8_t *(void *modes, void *const *predicate);
 using SetModeFn = void(void *modes, void *mode);
 using BuildSettingsFn = uint64_t(void *mode, uint8_t *settings);
-using WeatherPickFn = int(void *sys, int a2, int a3, int a4);
 
 BuildSettingsFn *orig_build_settings = nullptr;
-WeatherPickFn *orig_weather_pick = nullptr;
 using WeatherSetupFn = void(void *ws, uint8_t *settings, void *config);
 WeatherSetupFn *orig_weather_setup = nullptr;
 
@@ -810,20 +808,6 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
         }
     }
     return r;
-}
-
-int hook_weather_pick(void *sys, int a2, int a3, int a4) {
-    int st = g_stage.load();
-    if (st != static_cast<int>(LaunchStage::idle)) {
-        bool want_wet = false;
-        {
-            std::lock_guard lock(g_mutex);
-            want_wet = (g_cfg.weather == "Wet");
-        }
-        swofty::log("[instant-race] Overriding session weather to %s", want_wet ? "Wet (Heavy Rain)" : "Dry (Clear)");
-        return want_wet ? 4 : 0;
-    }
-    return orig_weather_pick ? orig_weather_pick(sys, a2, a3, a4) : 0;
 }
 
 // Session weather (Swofty RE: Sess_GameWeatherSystem_SetupSession reads WeatherSessionSettings in rdx).
@@ -1493,6 +1477,12 @@ uint8_t *current_weekend(void *modes) {
     return wk;
 }
 
+size_t weekend_session_count(uint8_t *wk) {
+    uint8_t *b = nullptr, *en = nullptr;
+    if (!wk || !rd(wk, WK_SESSIONS, b) || !rd(wk, WK_SESSIONS + 8, en) || !b || en <= b) return 0;
+    return size_t(en - b) / 0xa0;
+}
+
 void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, const std::string &want_driver) {
     auto **begin = reinterpret_cast<uint8_t **>(e + ENTITY_ENTRANTS);
     if (!begin[0] || !begin[1] || begin[1] <= begin[0]) return;
@@ -1922,7 +1912,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     // (its calls come while no weekend exists yet); the season build then creates the weekend from that plan. Calling
     // it only after the build left the weekend without sessions (ghost grid, phantom first lap) unless an older
     // plan happened to be left in the service.
-    {
+    auto hand_plan = [&](const char *when) {
         uint64_t plan_race_kind = 3;
         char la[MAX_PATH] = {};
         if (GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la)) {
@@ -1943,12 +1933,13 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             auto **pvt = *reinterpret_cast<void ***>(p_svc);
             if (pvt && swofty::mem::readable(pvt, 0x270)) {
                 reinterpret_cast<void (*)(void *, void *, int)>(pvt[0x268 / 8])(p_svc, plan, 1);
-                ilog("[instant-race] Session plan handed to the weekend service before the season build");
+                ilog("[instant-race] Session plan handed to the weekend service %s", when);
             }
         } else {
-            ilog("[instant-race] Session plan NOT handed over before the season build (alloc=%p gsm=%p svc=%p)", p_alloc, p_gsm, p_svc);
+            ilog("[instant-race] Session plan NOT handed over %s (alloc=%p gsm=%p svc=%p)", when, p_alloc, p_gsm, p_svc);
         }
-    }
+    };
+    hand_plan("before the season build");
     reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
     {
         uint8_t *gp_mode = nullptr, *cur_mode = nullptr;
@@ -2005,6 +1996,33 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     seat_player_on_grid(e, mgr, cfg.team_id, cfg.driver_id);
 
     wk = current_weekend(modes);
+    if (wk && weekend_session_count(wk) == 0) {
+        // A Grand Prix weekend already in the mode that was never played (a profile with no Grand Prix played) is
+        // reset by the season build: its sessions are cleared and nothing lays them out again, so the race would
+        // have no session (phantom first lap, fastest-lap spam). Lay the season's weekends out from the weekend
+        // service's plan, as the game's weekend setup does (Sess_WeekendSetup_LayoutWeekends).
+        static uintptr_t layout = 0;
+        if (!layout && swofty::api && swofty::api->resolve) layout = swofty::api->resolve("Sess_WeekendSetup_LayoutWeekends");
+        if (!layout)
+            layout = scan_pattern("41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 78 C5 F8 29 74 24 60 48 89 CE 48 8B 89 70 02 00 00 48 8B 01 FF 90 88 00 00 00");
+        uint8_t *lsvc = g_addrs.weekend_service
+            ? static_cast<uint8_t *>(registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)) : nullptr;
+        void *svc_reg = nullptr, *svc_ent = nullptr;
+        if (lsvc) {
+            rd(lsvc, 0x270, svc_reg);
+            rd(lsvc, 0x278, svc_ent);
+        }
+        if (layout && lsvc && svc_reg && svc_ent == e) {
+            hand_plan("before laying out the weekend");
+            reinterpret_cast<void (*)(void *)>(layout)(lsvc);
+            wk = current_weekend(modes);
+            ilog("[instant-race] The weekend had no sessions after the build; laid out again: %zu session(s)",
+                 weekend_session_count(wk));
+        } else {
+            ilog("[instant-race] The weekend has no sessions and could not be laid out (layout %p, service %p, entity %p)",
+                 (void *)layout, lsvc, svc_ent);
+        }
+    }
     if (!wk) ilog("[instant-race] current weekend not readable after entrants (will retry at load)");
     if (wk && swofty::mem::readable(wk, WK_TRACK + 4)) {
         wk[WK_TRACK] = track[1];
@@ -2184,7 +2202,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.3 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2252,7 +2270,14 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     if (show_menu_prompt && on_home && !g_menu_open) {
         float sw = 0, sh = 0;
         size(paint, &sw, &sh);
-        Rect pill{sw - u.u(275.0f), u.u(138.0f), u.u(215.0f), u.u(38.0f)};
+        // The game draws its menus in a centred 16:9 area; on ultrawide and triple screens anchor the prompt there
+        // instead of at the far right of the whole display.
+        float area_x = 0, area_w = sw;
+        if (sh > 0 && sw / sh > 16.0f / 9.0f + 0.01f) {
+            area_w = sh * 16.0f / 9.0f;
+            area_x = (sw - area_w) * 0.5f;
+        }
+        Rect pill{area_x + area_w - u.u(275.0f), u.u(138.0f), u.u(215.0f), u.u(38.0f)};
         if (ui::button(u, pill, "[F7] Instant Race")) {
             g_menu_open = true;
             if (!g_initialized_roll) {
@@ -2438,18 +2463,6 @@ bool init_plugin() {
                 nullptr});
     }
 
-    for (const char *sym : {"Sess_Weather_PickRandomType", "session.weather_pick_random_type"}) {
-        if (swofty::api->resolve(sym) != 0) {
-            swofty::detail::append(swofty::detail::mixins,
-                new swofty::detail::node{
-                    {sym, SWOFTY_MIXIN_WRAP, 0,
-                     reinterpret_cast<void *>(&hook_weather_pick),
-                     reinterpret_cast<void **>(&orig_weather_pick)},
-                    nullptr});
-            break;
-        }
-    }
-
     if (swofty::api->resolve("FeHome_Handle_Command") != 0) {
         swofty::detail::append(swofty::detail::mixins,
             new swofty::detail::node{
@@ -2486,7 +2499,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.2 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.3 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)

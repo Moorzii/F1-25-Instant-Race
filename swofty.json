@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "moorzii.instant-race",
   "name": "Instant Race",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Moorzii",
   "description": "Skip the menus: pick (or randomise) an era, car, track and weather from your installed packs and jump straight into a race. Includes a Surprise mode. Press F7 on the main menu. Beta: restart the game between Instant Races.",
   "license": "MIT",

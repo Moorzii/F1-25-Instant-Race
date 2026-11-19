@@ -14,11 +14,17 @@ Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the e
 ## Known limitations (beta)
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
 - **Restart the game after an Instant Race** before starting another Instant Race or any other race from the game's menus. A second Instant Race in the same game session is blocked (the mod shows a reminder), and a normal race started afterwards can black-screen while loading.
+- **Cars can occasionally spawn inside each other on the grid** when the race first loads. Restart the session from the pause menu and the grid lines up normally.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
+**1.0.3**
+- Fixed the race having no session on profiles that have never played a Grand Prix, which caused the lap counter to jump to 2/2 and fastest-lap spam on the first crossing of the line.
+- The "[F7] Instant Race" button now sits in the game's menu area on ultrawide and triple-screen setups, instead of at the far right of the display.
+- Removed an unused weather hook.
+
 **1.0.2**
 - Fixed the F7 key and the "[F7] Instant Race" button never appearing on setups with many addons (log: "flow hook: no stub memory near ..."), and the stutter while it retried.
 
