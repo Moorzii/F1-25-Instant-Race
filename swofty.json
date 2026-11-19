@@ -2,11 +2,12 @@
   "schema_version": 1,
   "id": "moorzii.instant-race",
   "name": "Instant Race",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Moorzii",
   "description": "Skip the menus: pick (or randomise) an era, car, track and weather from your installed packs and jump straight into a race. Includes a Surprise mode. Press F7 on the main menu. Beta: restart the game between Instant Races.",
   "license": "MIT",
   "repository": "https://github.com/Moorzii/F1-25-Instant-Race",
+  "icon": "icon.png",
   "category": "utility",
   "kind": ["native"],
   "compat": {
@@ -14,7 +15,10 @@
     "launcher": ">=1.7.4"
   },
   "requires": [
-    { "id": "swofty.core", "version": ">=0.2.13" }
+    {
+      "id": "swofty.core",
+      "version": ">=0.2.13"
+    }
   ],
   "experimental_features": ["overlay"],
   "options": [
@@ -23,7 +27,13 @@
       "type": "choice",
       "label": "Instant Race Menu Key",
       "description": "Keyboard key used on the main menu to open or close Instant Race.",
-      "values": ["F7", "F8", "F10", "Insert", "Home"],
+      "values": [
+        "F7",
+        "F8",
+        "F10",
+        "Insert",
+        "Home"
+      ],
       "default": "F7",
       "binds": "native"
     },
@@ -38,7 +48,10 @@
   ],
   "operations": {
     "native": [
-      { "dll": "native/instant_race.dll", "early": false }
+      {
+        "dll": "native/instant_race.dll",
+        "early": false
+      }
     ]
   }
 }

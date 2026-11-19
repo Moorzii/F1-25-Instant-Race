@@ -253,6 +253,19 @@ void resolve_all_game_addrs() {
         }
     }
 
+    // Fallback to the launcher's own bindings when a pattern misses: another addon hooking one of these functions
+    // rewrites its first bytes, which breaks the byte-pattern search (seen with a larger addon set enabled).
+    if (swofty::api && swofty::api->resolve) {
+        if (!g_addrs.game_manager) {
+            g_addrs.game_manager = swofty::api->resolve("g_Game_Manager");
+            if (g_addrs.game_manager) ilog("[instant-race] game manager from launcher binding: %p", (void *)g_addrs.game_manager);
+        }
+        if (!g_addrs.set_mode) {
+            g_addrs.set_mode = swofty::api->resolve("Game_Game_SetCurrentGameMode");
+            if (g_addrs.set_mode) ilog("[instant-race] set_mode from launcher binding: %p", (void *)g_addrs.set_mode);
+        }
+    }
+
     // 3. Game Root & Scene Despawn
     if (!g_addrs.game_root) {
         uintptr_t root_hit = scan_pattern("48 8B 05 ?? ?? ?? ?? 48 8B 40 60 48 8B 88 D0 09 00 00 FF 15 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 40 60");
@@ -427,6 +440,8 @@ using WeatherPickFn = int(void *sys, int a2, int a3, int a4);
 
 BuildSettingsFn *orig_build_settings = nullptr;
 WeatherPickFn *orig_weather_pick = nullptr;
+using WeatherSetupFn = void(void *ws, uint8_t *settings, void *config);
+WeatherSetupFn *orig_weather_setup = nullptr;
 
 template <class T> bool rd(const void *p, size_t off, T &out) {
     if (!p) return false;
@@ -811,6 +826,33 @@ int hook_weather_pick(void *sys, int a2, int a3, int a4) {
     return orig_weather_pick ? orig_weather_pick(sys, a2, a3, a4) : 0;
 }
 
+// Session weather (Swofty RE: Sess_GameWeatherSystem_SetupSession reads WeatherSessionSettings in rdx).
+// mode +0xb14 (0 = custom slot blocks), slots[8] at +0xb74 + d*0x44 (d = P1 P2 P3 Q SS R R2 R3), each
+// {f32 length, u32 count, f32 hold[6], f32 trans[6], u8 random[6] @+0x38, u8 type[6] @+0x3e}; type 0 clear .. 5 stormy.
+// For an Instant Race we write one fixed state into every dataset: clear for Dry, heavy rain for Wet.
+void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
+    int st = g_stage.load();
+    if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xb74 + 8 * 0x44)) {
+        bool want_wet = false;
+        {
+            std::lock_guard lock(g_mutex);
+            want_wet = (g_cfg.weather == "Wet");
+        }
+        uint8_t type = want_wet ? 4 : 0;
+        *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;
+        for (int d = 0; d < 8; ++d) {
+            uint8_t *slot = settings + 0xb74 + d * 0x44;
+            *reinterpret_cast<uint32_t *>(slot + 4) = 1;
+            for (int k = 0; k < 6; ++k) {
+                slot[0x38 + k] = 0;
+                slot[0x3e + k] = type;
+            }
+        }
+        ilog("[instant-race] Session weather set to %s (all datasets, custom slot)", want_wet ? "heavy rain" : "clear");
+    }
+    if (orig_weather_setup) orig_weather_setup(ws, settings, config);
+}
+
 // --- Flow State Machine Hook (scanned dynamically) ---
 uint8_t *find_flow_node(uint32_t want) {
     uint8_t *root = g_flow_root.load();
@@ -947,6 +989,7 @@ bool complete_load_sync(uint8_t *state) {
 
 // Make the weekend's first session the Race (what direct_start.cpp's choose_session does).
 // The weekend structure itself is already built once, earlier, in build_grand_prix_weekend().
+uint8_t *current_weekend(void *modes);
 void choose_race_session() {
     if (!g_addrs.game_manager) return;
     void *mgr = nullptr;
@@ -954,19 +997,10 @@ void choose_race_session() {
     void *modes = nullptr;
     if (!rd(mgr, MANAGER_MODES, modes) || !modes) return;
 
-    uint8_t *wk = nullptr;
-    {
-        uint8_t *holder = nullptr, *entity = nullptr, *champ = nullptr, *sb = nullptr, *se = nullptr,
-                *season = nullptr, **wb = nullptr, **we = nullptr;
-        uint32_t si = 0, wi = 0;
-        if (!rd(modes, 0x88, holder) || !rd(holder, 0x260, entity) || !rd(entity, 0x1058, champ) ||
-            !rd(champ, 0x548, sb) || !rd(champ, 0x550, se) || !rd(champ, 0x560, si) || se <= sb ||
-            si >= size_t(se - sb) / 16 || !rd(sb, size_t(si) * 16 + 8, season) || !rd(season, 0x288, wb) ||
-            !rd(season, 0x290, we) || !rd(season, 0x2a0, wi) || we <= wb || wi >= size_t(we - wb) ||
-            !rd(wb, size_t(wi) * 8, wk) || !swofty::mem::readable(wk, 0x280)) {
-            swofty::log("[instant-race] choose_race_session: no current weekend to read");
-            return;
-        }
+    uint8_t *wk = current_weekend(modes);
+    if (!wk) {
+        swofty::log("[instant-race] choose_race_session: no current weekend to read");
+        return;
     }
     auto *b = *reinterpret_cast<uint8_t **>(wk + 0x220);
     auto *e = *reinterpret_cast<uint8_t **>(wk + 0x228);
@@ -977,7 +1011,7 @@ void choose_race_session() {
             cur = 0;
         }
         auto &id = *reinterpret_cast<uint32_t *>(b + 0x8);
-        swofty::log("[instant-race] Weekend session[0] id %u -> 15 (Race)", id);
+        ilog("[instant-race] Weekend session[0] id %u -> 15 (Race)", id);
         id = 15;
         int ts = g_track_stat.load();
         if (ts >= 0 && wk[0x278] != uint8_t(ts)) {
@@ -985,7 +1019,7 @@ void choose_race_session() {
             wk[0x278] = uint8_t(ts);
         }
     } else {
-        swofty::log("[instant-race] choose_race_session: weekend has no readable sessions");
+        ilog("[instant-race] choose_race_session: weekend has no readable sessions");
     }
 }
 
@@ -1376,7 +1410,27 @@ void *registry_call(uint8_t *entity, size_t slot, const void *a2, int a3) {
     return reinterpret_cast<void *(*)(void *, const void *, int)>(vt[slot / 8])(reg, a2, a3);
 }
 
+std::atomic<uint8_t *> g_gp_mode{nullptr}; // the Grand Prix mode (entity+ENTITY_MODE) the weekend was built on
+
+// Same chain the session load reads ([modes+0x88] mode > +0x260 entity > +0x1058 championship > ...), but starting
+// from a given mode instead of the current one.
+uint8_t *weekend_of_mode(uint8_t *mode) {
+    uint8_t *entity = nullptr, *champ = nullptr, *sb = nullptr, *se = nullptr, *season = nullptr, **wb = nullptr, **we = nullptr, *wk = nullptr;
+    uint32_t si = 0, wi = 0;
+    if (!mode || !rd(mode, 0x260, entity) || !rd(entity, 0x1058, champ) ||
+        !rd(champ, 0x548, sb) || !rd(champ, 0x550, se) || !rd(champ, 0x560, si) || se <= sb ||
+        si >= size_t(se - sb) / 16 || !rd(sb, size_t(si) * 16 + 8, season) || !rd(season, 0x288, wb) ||
+        !rd(season, 0x290, we) || !rd(season, 0x2a0, wi) || we <= wb || wi >= size_t(we - wb) ||
+        !rd(wb, size_t(wi) * 8, wk) || !swofty::mem::readable(wk, 0x280)) {
+        return nullptr;
+    }
+    return wk;
+}
+
+
 uint8_t *current_weekend(void *modes) {
+    // The chain the session load reads ([modes+0x88] championship holder > +0x260 ...); the GP mode's own chain is
+    // only a fallback for when that can't be read.
     uint8_t *holder = nullptr, *entity = nullptr, *champ = nullptr, *sb = nullptr, *se = nullptr, *season = nullptr,
             **wb = nullptr, **we = nullptr, *wk = nullptr;
     uint32_t si = 0, wi = 0;
@@ -1385,7 +1439,7 @@ uint8_t *current_weekend(void *modes) {
         si >= size_t(se - sb) / 16 || !rd(sb, size_t(si) * 16 + 8, season) || !rd(season, 0x288, wb) ||
         !rd(season, 0x290, we) || !rd(season, 0x2a0, wi) || we <= wb || wi >= size_t(we - wb) ||
         !rd(wb, size_t(wi) * 8, wk) || !swofty::mem::readable(wk, 0x280)) {
-        return nullptr;
+        return weekend_of_mode(g_gp_mode.load());
     }
     return wk;
 }
@@ -1505,16 +1559,33 @@ void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, co
             }
             if (score > best) { best = score; seat = r; }
         }
-        if (!seat) {
-            // Swofty season lists put Marussia/Manor/Virgin in the Haas slot (e.g. sw13_haas).
-            bool backmarker = false;
-            for (auto &tk : toks) if (tk == "marussia" || tk == "manor" || tk == "virgin") backmarker = true;
-            for (size_t i = 0; backmarker && i < n && !seat; ++i) {
+        if (best < 3) {
+            // The team name itself didn't match (at best an engine supplier did): try the slot aliases first.
+            uint8_t *engine_only = seat;
+            seat = nullptr;
+            // Swofty season lists keep each team in its modern "slot": Marussia/Manor/Virgin in the Haas slot,
+            // Renault/Alpine in the Lotus slot, Racing Point/Aston Martin in Force India's, AlphaTauri/RB in Toro
+            // Rosso's, Alfa Romeo/Kick in Sauber's (e.g. sw13_haas is the 2013 Marussia, sw18_lotus the 2018 Renault).
+            static const std::pair<const char *, const char *> SLOT_ALIASES[] = {
+                {"marussia", "haas"}, {"manor", "haas"}, {"virgin", "haas"},
+                {"renault", "lotus"}, {"alpine", "lotus"},
+                {"point", "force"}, {"aston", "force"},
+                {"alphatauri", "toro"}, {"tauri", "toro"}, {"visa", "toro"},
+                {"alfa", "sauber"}, {"kick", "sauber"}, {"stake", "sauber"},
+            };
+            const char *slot = nullptr;
+            for (auto &tk : toks) {
+                for (auto &al : SLOT_ALIASES) if (tk == al.first) { slot = al.second; break; }
+                if (slot) break;
+            }
+            for (size_t i = 0; slot && i < n && !seat; ++i) {
                 uint8_t *r = begin[0] + i * ENTRANT_SIZE;
                 if (r[0x4b] & 0x10) continue;
                 std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
-                if (t_str.find("haas") != std::string::npos) seat = r;
+                if (t_str.find(slot) != std::string::npos) seat = r;
             }
+            if (slot) ilog("[instant-race] Team slot alias -> '%s': %s", slot, seat ? "found" : "none");
+            if (!seat) seat = engine_only;
         }
         std::string all;
         for (size_t i = 0; i < n; ++i) {
@@ -1568,7 +1639,8 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     resolve_all_game_addrs();
 
     if (!g_addrs.game_manager || !g_addrs.set_mode || !g_addrs.mode_by_predicate || !g_addrs.gp_predicate) {
-        swofty::log("[instant-race] Missing core game manager / mode signatures");
+        ilog("[instant-race] Missing core game manager / mode signatures (game_manager=%p set_mode=%p mode_by_predicate=%p gp_predicate=%p)",
+             (void *)g_addrs.game_manager, (void *)g_addrs.set_mode, (void *)g_addrs.mode_by_predicate, (void *)g_addrs.gp_predicate);
         swofty::overlay::ui::toast(g_ui_state, "Instant Race: Core game signatures not found on this build.");
         g_stage.store(static_cast<int>(LaunchStage::idle));
         return false;
@@ -1797,7 +1869,46 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     *reinterpret_cast<void **>(stub + 0x290) = rounds;
     *reinterpret_cast<void **>(holder + 0x18) = track;
     *reinterpret_cast<void **>(stub + 0x298) = holder;
+    // Hand the weekend service the session plan BEFORE the season is built, as the game's own Grand Prix menu does
+    // (its calls come while no weekend exists yet); the season build then creates the weekend from that plan. Calling
+    // it only after the build left the weekend without sessions (ghost grid, phantom first lap) unless an older
+    // plan happened to be left in the service.
+    {
+        uint64_t plan_race_kind = 3;
+        char la[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la)) {
+            std::string f = std::string(la) + "\\Swofty\\instant_race_kind7.txt";
+            if (GetFileAttributesA(f.c_str()) != INVALID_FILE_ATTRIBUTES) plan_race_kind = 7;
+        }
+        void *p_alloc = nullptr, *p_gsm = nullptr;
+        rd(rounds, 0x210, p_alloc);
+        rd(e, 0x2b0, p_gsm);
+        void *p_svc = g_addrs.weekend_service
+            ? registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1) : nullptr;
+        if (p_alloc && p_gsm && p_svc && g_addrs.weekend_structure && swofty::mem::readable(p_svc, 8)) {
+            alignas(16) uint8_t plan[0x38]{};
+            *reinterpret_cast<void **>(plan + 8) = p_alloc;
+            *reinterpret_cast<void **>(plan + 0x10) = p_alloc;
+            reinterpret_cast<void (*)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)>(
+                g_addrs.weekend_structure)(plan, p_gsm, 0, 0, plan_race_kind, 0, 1, 0, 0);
+            auto **pvt = *reinterpret_cast<void ***>(p_svc);
+            if (pvt && swofty::mem::readable(pvt, 0x270)) {
+                reinterpret_cast<void (*)(void *, void *, int)>(pvt[0x268 / 8])(p_svc, plan, 1);
+                ilog("[instant-race] Session plan handed to the weekend service before the season build");
+            }
+        } else {
+            ilog("[instant-race] Session plan NOT handed over before the season build (alloc=%p gsm=%p svc=%p)", p_alloc, p_gsm, p_svc);
+        }
+    }
     reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
+    {
+        uint8_t *gp_mode = nullptr, *cur_mode = nullptr;
+        rd(e, ENTITY_MODE, gp_mode);
+        rd(modes, 0x88, cur_mode);
+        g_gp_mode.store(gp_mode);
+        if (cur_mode != gp_mode)
+            ilog("[instant-race] Note: the game's current mode (%p) is not the Grand Prix mode (%p) after the switch", cur_mode, gp_mode);
+    }
 
     g_track_stat.store(track[1]);
     uint8_t *wk = current_weekend(modes);
@@ -1821,6 +1932,10 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             if (GetFileAttributesA(f.c_str()) != INVALID_FILE_ATTRIBUTES) race_kind = 7;
         }
         ilog("[instant-race] Weekend race kind = %llu", (unsigned long long)race_kind);
+    }
+    if (!(alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8))) {
+        ilog("[instant-race] Weekend structure NOT built (alloc=%p gsm=%p svc=%p fn=%p)", alloc, cur_gsm, svc,
+             (void *)g_addrs.weekend_structure);
     }
     if (alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8)) {
         alignas(16) uint8_t wlist[0x38]{};
@@ -2020,7 +2135,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.0 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2265,6 +2380,15 @@ bool init_plugin() {
         }
     }
 
+    if (swofty::api->resolve("Sess_GameWeatherSystem_SetupSession") != 0) {
+        swofty::detail::append(swofty::detail::mixins,
+            new swofty::detail::node{
+                {"Sess_GameWeatherSystem_SetupSession", SWOFTY_MIXIN_WRAP, 0,
+                 reinterpret_cast<void *>(&hook_weather_setup),
+                 reinterpret_cast<void **>(&orig_weather_setup)},
+                nullptr});
+    }
+
     for (const char *sym : {"Sess_Weather_PickRandomType", "session.weather_pick_random_type"}) {
         if (swofty::api->resolve(sym) != 0) {
             swofty::detail::append(swofty::detail::mixins,
@@ -2313,7 +2437,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.0 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)

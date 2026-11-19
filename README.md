@@ -18,6 +18,17 @@ Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the e
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
 - Game updates can stop the mod working until it's updated.
 
+## Changelog
+**1.0.1**
+- Fixed cars spawning inside each other on the grid ("ghost grid") and the lap counter jumping to lap 2 with fastest-lap spam on the first crossing at some tracks.
+- Fixed the Wet/Dry setting: it now actually sets the race weather.
+- Fixed "Core game signatures not found" when Career Mode Editor (or another addon hooking the game-mode switch) is enabled.
+- Fixed teams like Williams-Mercedes, Aston Martin, Renault/Alpine and Marussia putting you in the wrong car.
+- Added the addon icon.
+
+**1.0.0**
+- First release (beta).
+
 ## Reporting a bug
 Please include the log file:
 `%LOCALAPPDATA%\Swofty\instant_race.log`
