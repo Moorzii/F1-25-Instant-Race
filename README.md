@@ -13,7 +13,7 @@ Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the e
 
 ## Known limitations (beta)
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
-- **Restart the game between Instant Races.** Starting a second Instant Race in the same game session is blocked, because it currently hangs on the menu. The mod shows a reminder when you press Start.
+- **Restart the game after an Instant Race** before starting another Instant Race or any other race from the game's menus. A second Instant Race in the same game session is blocked (the mod shows a reminder), and a normal race started afterwards can black-screen while loading.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
 - Game updates can stop the mod working until it's updated.

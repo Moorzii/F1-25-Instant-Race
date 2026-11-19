@@ -18,8 +18,13 @@ Bring the slider back once the game's 0-110 setting is found (Swofty's docs list
 - Plan: a memory search in the mod. Snapshot every int32 equal to the player's current Grand Prix AI level, change it in the Grand Prix menu, keep the addresses that changed to the new value. Menu-only tests, no races.
 - Not in the options store under `ai_difficulty`, `ai_level`, `difficulty` or `aiDifficulty`, and not in the session settings dump.
 
-## 4. Second Instant Race without restarting the game
-Currently blocked with a "restart the game" message.
+## 4. Second Instant Race (or any other race) without restarting the game
+Currently blocked with a "restart the game" message. A player also reports that starting a normal race from the
+game's own menus after an Instant Race black-screens on loading; likely the same root cause (the menu/session
+hand-off after our race), so treat them as one bug. Ask for that player's Send Logs bundle to confirm.
+- Check whether the mod's stage returns to idle after the race (no "Returned to main menu" line has been seen in
+  logs) and whether anything left on the Grand Prix entity (cleared rounds, entrant list, setup mode, the session
+  plan handed to the weekend service) breaks the next Grand Prix built from the menu.
 - On a second launch StateFrontend (957880c6) goes to status 3 (exiting) and never finishes; its exit never starts the menu fade-out, while the first launch does it within ~10 ms. Forcing the fade did not help.
 - Next step: read the game's StateFrontend exit code (decrypted at runtime, so the mod would need to dump it) to see what it waits for.
 
