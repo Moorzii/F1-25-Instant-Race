@@ -28,6 +28,7 @@ Option to choose where the player starts (P1 to the back), or random.
 - Swofty docs: `session.grid.build` event (`Game_GridSetup_SetupStartingGrid`) and the grid placement functions in `std/systems/sessions`.
 
 ## Smaller items
+- Ultrawide / triple screens: the "[F7] Instant Race" prompt is drawn at the far right of the whole display, while the game draws its menus in a centred 16:9 area (seen on 7680x1440). Anchor the prompt (and check the menu panel and loading card) to that centred 16:9 area: when width/height > 16/9, use x0 = (width - height*16/9) / 2 and w = height*16/9.
 - Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`).
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.
 - Remove the old `Sess_Weather_PickRandomType` hook, which never fires.
