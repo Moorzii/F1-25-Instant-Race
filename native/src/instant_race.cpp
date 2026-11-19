@@ -1348,47 +1348,96 @@ bool install_flow_hook() {
     uintptr_t rip_after = reinterpret_cast<uintptr_t>(target + 10);
     uintptr_t g_stay_addr = rip_after + orig_disp;
 
-    constexpr uintptr_t kRange = 0x70000000ULL; // stays inside rel32 reach with margin
-    uintptr_t search_start = (reinterpret_cast<uintptr_t>(target) > kRange + 0x10000ULL)
-        ? (reinterpret_cast<uintptr_t>(target) - kRange) : 0x10000ULL;
-    uint8_t *stub = nullptr;
-    for (uintptr_t addr = search_start; addr < reinterpret_cast<uintptr_t>(target) + kRange; addr += 0x10000) {
-        stub = static_cast<uint8_t *>(VirtualAlloc(reinterpret_cast<void *>(addr), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-        if (stub) break;
+    // The stub can live anywhere (absolute addressing only). The 5-byte jump at the target needs a landing spot
+    // within rel32 reach, so we use a run of int3 padding (0xCC) between functions in the game's own code as a
+    // 14-byte trampoline (jmp [rip+0] -> stub). This replaces the old sweep for free memory near the game, which
+    // fails when many addons have used up that address range (1.0.0 bug: "no stub memory near ...").
+    uint8_t *stub = static_cast<uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!stub) { swofty::log("[instant-race] flow hook: VirtualAlloc for the stub failed"); return false; }
+
+    uint8_t *cave = nullptr;
+    {
+        constexpr size_t kNeed = 16;
+        constexpr intptr_t kSpan = 0x4000000; // search +-64 MB around the target, well inside rel32 reach
+        uintptr_t lo = reinterpret_cast<uintptr_t>(target) > uintptr_t(kSpan) ? reinterpret_cast<uintptr_t>(target) - kSpan : 0;
+        uintptr_t hi = reinterpret_cast<uintptr_t>(target) + kSpan;
+        for (uintptr_t page = (reinterpret_cast<uintptr_t>(target) & ~uintptr_t(0xfff)), step = 0; !cave && step < 2 * (kSpan / 0x1000); ++step) {
+            // alternate forwards / backwards from the target's page
+            intptr_t k = intptr_t(step / 2 + 1) * ((step & 1) ? -1 : 1);
+            uintptr_t pg = page + k * 0x1000;
+            if (pg < lo || pg >= hi) continue;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!VirtualQuery(reinterpret_cast<void *>(pg), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) continue;
+            if (!(mbi.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) continue;
+            auto *p = reinterpret_cast<uint8_t *>(pg);
+            size_t run = 0;
+            for (size_t o = 0; o < 0x1000; ++o) {
+                run = (p[o] == 0xCC) ? run + 1 : 0;
+                // need kNeed CCs after a ret / jmp / CC boundary, and keep 1 byte of padding untouched at the start
+                if (run == kNeed + 1 && o + 1 >= kNeed + 1) {
+                    uint8_t *start = p + o + 1 - kNeed;
+                    if (start - 2 >= p && (start[-2] == 0xC3 || start[-2] == 0xCC || start[-2] == 0xE9 || start[-2] == 0xEB)) {
+                        cave = start;
+                        break;
+                    }
+                }
+            }
+        }
     }
-    if (!stub) { swofty::log("[instant-race] flow hook: no stub memory near %p", target); return false; }
+    if (!cave) { swofty::log("[instant-race] flow hook: no code cave near %p", target); VirtualFree(stub, 0, MEM_RELEASE); return false; }
 
     size_t p = 0;
-    stub[p++] = 0x8B; stub[p++] = 0x54; stub[p++] = 0x24; stub[p++] = 0x40;
-    stub[p++] = 0x51;
+    stub[p++] = 0x8B; stub[p++] = 0x54; stub[p++] = 0x24; stub[p++] = 0x40;   // mov edx, [rsp+0x40]
+    stub[p++] = 0x51;                                                         // push rcx
     stub[p++] = 0x41; stub[p++] = 0x50;
     stub[p++] = 0x41; stub[p++] = 0x51;
     stub[p++] = 0x41; stub[p++] = 0x52;
     stub[p++] = 0x41; stub[p++] = 0x53;
-    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xEC; stub[p++] = 0x28;
-    stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xF9;
-    stub[p++] = 0x48; stub[p++] = 0xB8;
+    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xEC; stub[p++] = 0x28;   // sub rsp, 0x28
+    stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xF9;                     // mov rcx, rdi
+    stub[p++] = 0x48; stub[p++] = 0xB8;                                       // mov rax, imm64
     uint64_t fn_addr = reinterpret_cast<uint64_t>(&on_flow_link_check);
     std::memcpy(stub + p, &fn_addr, 8); p += 8;
-    stub[p++] = 0xFF; stub[p++] = 0xD0;
-    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xC4; stub[p++] = 0x28;
+    stub[p++] = 0xFF; stub[p++] = 0xD0;                                       // call rax
+    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xC4; stub[p++] = 0x28;   // add rsp, 0x28
     stub[p++] = 0x41; stub[p++] = 0x5B;
     stub[p++] = 0x41; stub[p++] = 0x5A;
     stub[p++] = 0x41; stub[p++] = 0x59;
     stub[p++] = 0x41; stub[p++] = 0x58;
-    stub[p++] = 0x59;
-    stub[p++] = 0x89; stub[p++] = 0x44; stub[p++] = 0x24; stub[p++] = 0x40;
-    stub[p++] = 0x39; stub[p++] = 0x05;
-    int32_t new_disp = static_cast<int32_t>(g_stay_addr - reinterpret_cast<uintptr_t>(stub + p + 4));
-    std::memcpy(stub + p, &new_disp, 4); p += 4;
-    stub[p++] = 0xE9;
-    int32_t jmp_back = static_cast<int32_t>(rip_after - reinterpret_cast<uintptr_t>(stub + p + 4));
-    std::memcpy(stub + p, &jmp_back, 4); p += 4;
+    stub[p++] = 0x59;                                                         // pop rcx
+    stub[p++] = 0x89; stub[p++] = 0x44; stub[p++] = 0x24; stub[p++] = 0x40;   // mov [rsp+0x40], eax
+    // cmp [g_stay], eax with an absolute address (push/pop/mov leave the flags alone)
+    stub[p++] = 0x51;                                                         // push rcx
+    stub[p++] = 0x48; stub[p++] = 0xB9;                                       // mov rcx, imm64
+    uint64_t stay = g_stay_addr;
+    std::memcpy(stub + p, &stay, 8); p += 8;
+    stub[p++] = 0x39; stub[p++] = 0x01;                                       // cmp [rcx], eax
+    stub[p++] = 0x59;                                                         // pop rcx
+    stub[p++] = 0xFF; stub[p++] = 0x25;                                       // jmp [rip+0] -> rip_after
+    *reinterpret_cast<uint32_t *>(stub + p) = 0; p += 4;
+    uint64_t back = rip_after;
+    std::memcpy(stub + p, &back, 8); p += 8;
+    FlushInstructionCache(GetCurrentProcess(), stub, p);
+
+    {
+        DWORD cave_old = 0;
+        if (!VirtualProtect(cave, 16, PAGE_EXECUTE_READWRITE, &cave_old)) {
+            swofty::log("[instant-race] flow hook: VirtualProtect on the code cave failed");
+            VirtualFree(stub, 0, MEM_RELEASE);
+            return false;
+        }
+        cave[0] = 0xFF; cave[1] = 0x25;                                       // jmp [rip+0] -> stub
+        *reinterpret_cast<uint32_t *>(cave + 2) = 0;
+        uint64_t stub_addr = reinterpret_cast<uint64_t>(stub);
+        std::memcpy(cave + 6, &stub_addr, 8);
+        VirtualProtect(cave, 16, cave_old, &cave_old);
+        FlushInstructionCache(GetCurrentProcess(), cave, 16);
+    }
 
     DWORD old_prot = 0;
     if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &old_prot)) { swofty::log("[instant-race] flow hook: VirtualProtect failed"); return false; }
     target[0] = 0xE9;
-    int32_t jmp_stub = static_cast<int32_t>(reinterpret_cast<uintptr_t>(stub) - reinterpret_cast<uintptr_t>(target + 5));
+    int32_t jmp_stub = static_cast<int32_t>(reinterpret_cast<uintptr_t>(cave) - reinterpret_cast<uintptr_t>(target + 5));
     std::memcpy(target + 1, &jmp_stub, 4);
     for (int i = 5; i < 10; ++i) target[i] = 0x90;
     VirtualProtect(target, 16, old_prot, &old_prot);
@@ -1396,7 +1445,7 @@ bool install_flow_hook() {
 
     init_ui_route_hooks();
     g_flow_hook_installed = true;
-    swofty::log("[instant-race] Installed flow link hook at %p -> stub %p", target, stub);
+    swofty::log("[instant-race] Installed flow link hook at %p -> cave %p -> stub %p", target, cave, stub);
     return true;
 }
 
@@ -2135,7 +2184,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2437,7 +2486,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.1 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.2 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)

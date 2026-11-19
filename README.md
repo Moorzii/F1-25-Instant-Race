@@ -19,6 +19,9 @@ Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the e
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
+**1.0.2**
+- Fixed the F7 key and the "[F7] Instant Race" button never appearing on setups with many addons (log: "flow hook: no stub memory near ..."), and the stutter while it retried.
+
 **1.0.1**
 - Fixed cars spawning inside each other on the grid ("ghost grid") and the lap counter jumping to lap 2 with fastest-lap spam on the first crossing at some tracks.
 - Fixed the Wet/Dry setting: it now actually sets the race weather.
