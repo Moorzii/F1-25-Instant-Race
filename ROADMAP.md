@@ -22,7 +22,7 @@ On some loads every car spawns on the start/finish line instead of its grid slot
 - Swofty 1.10.0 (20 Nov) skips the game's 3 s minimum loading screen. If the ghost grid is a timing race with the menu
   scene, it may now show up more or less often: note the launcher version with every ghosted report.
 
-## 1. Time of day (in progress, on `next`)
+## 1. Time of day (done on `next`, for 1.0.5)
 Race start time: Track Default, Sunrise, Morning, Midday, Afternoon, Sunset, Night; also in Roll All and Surprise.
 - Set in the weather hook: WeatherSessionSettings +0xb10/+0xb11 cleared, +0xb19 and +0xb28 + d*8 = preset.
   GameWeatherSystem::setupSession (0x1438b98e0 on this build) maps the preset: 0 = A-1h, 1 = A, 2 = (A+midday)/2,
@@ -31,7 +31,7 @@ Race start time: Track Default, Sunrise, Morning, Midday, Afternoon, Sunset, Nig
 - Tested 20 Nov: Sunset works at Silverstone; Night (00:00) works at Losail (floodlights) but shows sunset at
   Silverstone. Track weather config +0x29d is the night-lighting flag (1 at Losail, 0 at Silverstone), so Night falls
   back to Sunset where it is 0. Preset 6 (B+1h) dropped: at Silverstone it lands on the real sunset (20:05).
-- Still to check: the day presets at a floodlit track (its A/B times are stored as -1 in GameWeatherSystem).
+- Checked 20 Nov (tod3): Afternoon at Singapore starts 14:43 and looks right; Night at Silverstone falls back to Sunset (19:15).
 
 ## 2. More season packs in the era list
 Support the GP/TT packs (e.g. "F1 2015 GP/TT Addon") and Classic Seasons, not only Swofty's own `sw_f1_<year>` grids.
