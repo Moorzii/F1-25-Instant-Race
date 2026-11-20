@@ -3,13 +3,17 @@
 Planned work, roughly in order. Notes under each item are where to start.
 
 ## 0. Ghost grid on the first load (intermittent)
-On a profile that never played a Grand Prix, cars sometimes spawn inside each other when the race first loads;
-restarting the session always fixes it. 1.0.3 fixed the missing race session (the weekend is laid out again with
-Sess_WeekendSetup_LayoutWeekends), but not this.
-- Game_GridSetup_SetupStartingGrid / DriverBasedGrid run once at the load (their 32-byte output stays 0xff on good
-  and bad loads alike) and not at all on a restart, so the placement comes from somewhere else.
-- Next: trace the per-car placement (Game_GridSlot_PlaceVehicle, Game_VehiclePlacementSystem) on a ghosted first
-  load and on the restart, and compare.
+On some loads every car spawns on the start/finish line instead of its grid slot; restarting the session always fixes it.
+- Log signal: halo-re's lap distance for the player equals the full track length (5810 m Suzuka, 7007 m Spa, 5409 m
+  Bahrain) on every ghosted run; a normal grid slot on every good run. 10 ghosted and 15 good runs this week.
+- No difference found in anything logged before placement: profile, version, sessions present, track, team, seat,
+  laps, weather, time since start-up, menus visited, load timing, Instant Race's own steps (identical setups at 00:27
+  and 01:00 on 19 Nov gave one bad and one good run). Only after-effects differ (lap event at spawn, no grid player shot).
+- Tried and ruled out: race session state (+0x10 = 1), the grid builders (SetupStartingGrid / DriverBasedGrid output is
+  empty on good and bad loads alike), rebuilding the weekend.
+- Placement logging exists (Game_VehicleProgressSystem_OnVehiclePlacedOnGrid fires for all cars at the end of loading;
+  Game_GridSlot_PlaceVehicle is not used for a Grand Prix). 4 good runs recorded on 20 Nov, no ghosted one yet: the
+  next ghosted run with that logging is the comparison needed.
 
 ## 1. Time of day
 Let players pick the race start time (or random).
@@ -27,15 +31,21 @@ Bring the slider back once the game's 0-110 setting is found (Swofty's docs list
 - Plan: a memory search in the mod. Snapshot every int32 equal to the player's current Grand Prix AI level, change it in the Grand Prix menu, keep the addresses that changed to the new value. Menu-only tests, no races.
 - Not in the options store under `ai_difficulty`, `ai_level`, `difficulty` or `aiDifficulty`, and not in the session settings dump.
 
-## 4. Second Instant Race (or any other race) without restarting the game
-Currently blocked with a "restart the game" message. A player also reports that starting a normal race from the
-game's own menus after an Instant Race black-screens on loading; likely the same root cause (the menu/session
-hand-off after our race), so treat them as one bug. Ask for that player's Send Logs bundle to confirm.
-- Check whether the mod's stage returns to idle after the race (no "Returned to main menu" line has been seen in
-  logs) and whether anything left on the Grand Prix entity (cleared rounds, entrant list, setup mode, the session
-  plan handed to the weekend service) breaks the next Grand Prix built from the menu.
-- On a second launch StateFrontend (957880c6) goes to status 3 (exiting) and never finishes; its exit never starts the menu fade-out, while the first launch does it within ~10 ms. Forcing the fade did not help.
-- Next step: read the game's StateFrontend exit code (decrypted at runtime, so the mod would need to dump it) to see what it waits for.
+## 4. Black screen on the next career / Grand Prix / Instant Race after an Instant Race
+Root cause found (20 Nov, diagnostic builds with per-state link logging):
+- Normal career start: StateFrontend (957880c6) leaves by its exit link, then StateFrontendWorld (290b11ae) reports
+  the session link (8c23ce89) and the game opens the loading states under e4ef00ba.
+- After an Instant Race: StateFrontendWorld reports its exit link (0eef86be) instead, so e4ef00ba, 40b45c37 and
+  e39dcbd5 exit in turn and the whole game flow unwinds to the root (black screen).
+- StateFrontendWorld already reported that exit link when Instant Race launched: the launch raised eInterruptExit
+  (0xe) on the shared interrupt queue. The queue type itself is back to 0 before the race (the game consumes it), but
+  the menu's world state keeps leaving by its exit link afterwards.
+- Not the cause (tested): the queue flag being left set (fix1 cleared it on the exact queue; no change).
+- Fix to test (fix2, in native/src/instant_race_fix2.cpp on the dev PC): do not raise eInterruptExit at all. The
+  leaf states are already sent out with LINK_EXIT by the flow hook, and StateFrontendWorld is sent to LINK_SESSION
+  once it has no child. Test: launch works; then Instant Race -> menu -> career loads; then a second Instant Race.
+- The menu fade bit 0x80000000 that Instant Race clears by hand never appears in a normal Grand Prix or career start;
+  it probably comes from the same interrupt exit. Check whether it still appears with fix2.
 
 ## 5. Starting grid slot
 Option to choose where the player starts (P1 to the back), or random.
