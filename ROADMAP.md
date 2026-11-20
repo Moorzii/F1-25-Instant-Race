@@ -19,6 +19,9 @@ On some loads every car spawns on the start/finish line instead of its grid slot
   Game_GridSlot_PlaceVehicle is not used for a Grand Prix). 4 good runs recorded on 20 Nov, no ghosted one yet: the
   next ghosted run with that logging is the comparison needed.
 
+- Swofty 1.10.0 (20 Nov) skips the game's 3 s minimum loading screen. If the ghost grid is a timing race with the menu
+  scene, it may now show up more or less often: note the launcher version with every ghosted report.
+
 ## 1. Time of day
 Let players pick the race start time (or random).
 - Same hook as the weather fix: `Sess_GameWeatherSystem_SetupSession` reads `WeatherSessionSettings`.
@@ -88,3 +91,11 @@ Option to choose where the player starts (P1 to the back), or random.
   "torro_rosso"; alias added; confirmed in game 20 Nov: 2013 Toro Rosso seated in sw13_toro_rosso). Checked with a simulation of the matcher over 29 real team ids: no other pick changes.
 - **Unverified:** the 2024 RB team's f1cg id never appears in the logs; if it is "rb-...", it would fall back to another
   car. Needs one log line with that pick.
+
+## Swofty 1.10.0 notes (20 Nov)
+- Career on the main menu now opens Swofty's own list of careers (`SWOFTY_RESUME_LIST=0` restores the game's menu). It
+  hooks Game_F1WorldActivityContainer_HandleCommand, which Instant Race also wraps; check both still work together.
+- New std libraries worth a look: weather setup (`session.weather.setup`, scripted forecasts per dataset; could replace
+  our own weather hook and give real changing weather), tyre damage and pit lane (for the tyre strategy / fuel report),
+  race control and standings.
+- None of Instant Race's bindings are on the deprecated list.
