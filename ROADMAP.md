@@ -45,16 +45,21 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
   (0xe) on the shared interrupt queue. The queue type itself is back to 0 before the race (the game consumes it), but
   the menu's world state keeps leaving by its exit link afterwards.
 - Not the cause (tested): the queue flag being left set (fix1 cleared it on the exact queue; no change).
-- Fix to test (fix2, in native/src/instant_race_fix2.cpp on the dev PC): do not raise eInterruptExit at all. The
-  leaf states are already sent out with LINK_EXIT by the flow hook, and StateFrontendWorld is sent to LINK_SESSION
-  once it has no child. Test: launch works; then Instant Race -> menu -> career loads; then a second Instant Race.
+- Not the fix (tested 20 Nov, 03:20): fix2, which stopped raising eInterruptExit. StateFrontend went to status 3 and
+  the menu scene despawned, but its exit never finished and no fade was requested; the launch timed out after 60 s on a
+  black main menu. Instant Race's path needs the interrupt for StateFrontend to finish exiting.
+- Next (diag4, native/src/instant_race_diag4.cpp on the dev PC, read-only): 1.0.3 behaviour plus memory snapshots of
+  StateFrontendWorld, StateFrontend, e4ef00ba and 40b45c37 (0xd40 bytes each, written to
+  %LOCALAPPDATA%\Swofty\instant_race_snap_*.bin) on the menu at start-up, at the launch, on the menu after the race,
+  at the career start, and whenever StateFrontendWorld reports a new link. Diffing start-up vs after-race should show
+  the field that keeps the exit decision. Then decide between resetting that field and clearing the interrupt the
+  instant StateFrontend's onStateExit finishes (Swofty's FTUE approach).
 - The menu fade bit 0x80000000 that Instant Race clears by hand never appears in a normal Grand Prix or career start;
-  it probably comes from the same interrupt exit. Check whether it still appears with fix2.
+  it probably comes from the same interrupt exit. 
 - Swofty's own direct start (launcher 1.9.91, native/src/core/direct_start.cpp) raises the same interrupt only on
   StateFTUE as it leaves, and clears it the moment StateFTUE's onStateExit finishes, so its parents never see it.
   Instant Race raised it on the first state its hook saw (e4ef00ba, a parent) and kept it set for ~3 s until
-  StateFrontendWorld had no child, long enough for the parents to latch it. Fix2 drops it, which also matches a normal
-  career start (StateFrontend leaves by its exit link 0eef86be there too, with no interrupt).
+  StateFrontendWorld had no child, long enough for the parents to latch it.
 
 ## 5. Starting grid slot
 Option to choose where the player starts (P1 to the back), or random.
@@ -73,6 +78,6 @@ Option to choose where the player starts (P1 to the back), or random.
   The one real wrong-car case (2022 Aston Martin -> Mercedes on 19 Nov 00:44) was a dev build from before the slot aliases.
 - **Fixed in `next`:** HRT (2012) put you in the Caterham (3-letter team names were never matched; now an exact
   slot-name match on the team's first word). 2013/2016 Toro Rosso could put you in the Ferrari (the game's ids spell it
-  "torro_rosso"; alias added). Checked with a simulation of the matcher over 29 real team ids: no other pick changes.
+  "torro_rosso"; alias added; confirmed in game 20 Nov: 2013 Toro Rosso seated in sw13_toro_rosso). Checked with a simulation of the matcher over 29 real team ids: no other pick changes.
 - **Unverified:** the 2024 RB team's f1cg id never appears in the logs; if it is "rb-...", it would fall back to another
   car. Needs one log line with that pick.
