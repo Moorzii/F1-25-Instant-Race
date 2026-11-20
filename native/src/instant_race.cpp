@@ -436,6 +436,14 @@ constexpr TimeOfDayChoice kTimesOfDay[] = {
 constexpr int kTimesOfDayCount = int(sizeof(kTimesOfDay) / sizeof(kTimesOfDay[0]));
 const char *time_of_day_label(int i) { return kTimesOfDay[(i >= 0 && i < kTimesOfDayCount) ? i : 0].label; }
 
+constexpr const char *kWeathers[] = {"Dry", "Wet", "Dry to Wet", "Wet to Dry"};
+constexpr int kWeathersCount = int(sizeof(kWeathers) / sizeof(kWeathers[0]));
+const char *next_weather(const std::string &w) {
+    for (int i = 0; i < kWeathersCount; ++i)
+        if (w == kWeathers[i]) return kWeathers[(i + 1) % kWeathersCount];
+    return kWeathers[0];
+}
+
 std::mutex g_mutex;
 RaceConfig g_cfg;
 bool g_menu_open = false;
@@ -809,8 +817,9 @@ void reroll_track() {
 void randomize_all() {
     reroll_era();
     reroll_track();
-    std::uniform_int_distribution<int> wdist(0, 3);
-    g_cfg.weather = (wdist(g_rng) == 0) ? "Wet" : "Dry";
+    std::uniform_int_distribution<int> wdist(0, 19); // 55% dry, 20% wet, 15% dry to wet, 10% wet to dry
+    int w = wdist(g_rng);
+    g_cfg.weather = w < 11 ? "Dry" : w < 15 ? "Wet" : w < 18 ? "Dry to Wet" : "Wet to Dry";
     std::uniform_int_distribution<int> tdist(0, kTimesOfDayCount - 1);
     g_cfg.time_of_day = tdist(g_rng);
 }
@@ -846,16 +855,54 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
 // Session weather (Swofty RE: Sess_GameWeatherSystem_SetupSession reads WeatherSessionSettings in rdx).
 // mode +0xb14 (0 = custom slot blocks), slots[8] at +0xb74 + d*0x44 (d = P1 P2 P3 Q SS R R2 R3), each
 // {f32 length, u32 count, f32 hold[6], f32 trans[6], u8 random[6] @+0x38, u8 type[6] @+0x3e}; type 0 clear .. 5 stormy.
-// For an Instant Race we write one fixed state into every dataset: clear for Dry, heavy rain for Wet.
+// Dry / Wet write one fixed state into every dataset (clear / heavy rain) through the custom-slot path.
+// Dry to Wet / Wet to Dry use the game's own scripted-weather path instead: with +0xb18 (exact timing) set,
+// setupSession builds every dataset straight from its slot block, holding each state hold_s seconds after a
+// trans_s-second transition into it (length = the sum; the last state holds to the end of the session).
+struct WeatherStep {
+    uint8_t type;   // 0 clear, 1 light cloud, 2 overcast, 3 light rain, 4 heavy rain, 5 storm
+    float trans;    // share of the race spent changing into this state
+    float hold;     // share of the race spent in it
+};
+constexpr WeatherStep kDryToWet[] = {{0, 0.00f, 0.30f}, {2, 0.08f, 0.07f}, {3, 0.08f, 0.10f}, {4, 0.07f, 0.40f}};
+constexpr WeatherStep kWetToDry[] = {{4, 0.00f, 0.25f}, {3, 0.08f, 0.12f}, {2, 0.08f, 0.10f}, {0, 0.07f, 0.40f}};
+constexpr float kSecondsPerLap = 95.0f; // rough lap time incl. the start, to place the change mid-race
+
+void write_weather_script(uint8_t *settings, const WeatherStep *steps, int n, float laps) {
+    float race_s = std::max(1.0f, laps) * kSecondsPerLap;
+    settings[0xb18] = 1;                                   // exact timing: build from hold/trans
+    *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;   // custom slots, not the realistic generator
+    for (int d = 0; d < 8; ++d) {
+        uint8_t *slot = settings + 0xb74 + d * 0x44;
+        float total = 0.0f;
+        for (int k = 0; k < 6; ++k) {
+            bool used = k < n;
+            float hold = used ? std::max(20.0f, steps[k].hold * race_s) : 0.0f;
+            float trans = (used && k > 0) ? std::max(20.0f, steps[k].trans * race_s) : 0.0f;
+            *reinterpret_cast<float *>(slot + 0x08 + k * 4) = hold;
+            *reinterpret_cast<float *>(slot + 0x20 + k * 4) = trans;
+            slot[0x38 + k] = 0;
+            slot[0x3e + k] = used ? steps[k].type : steps[n - 1].type;
+            total += hold + trans;
+        }
+        *reinterpret_cast<float *>(slot + 0x00) = total;
+        *reinterpret_cast<uint32_t *>(slot + 0x04) = uint32_t(n);
+    }
+}
+
 void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
     int st = g_stage.load();
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xb74 + 8 * 0x44)) {
         bool want_wet = false;
         int tod = 0;
+        std::string weather;
+        float laps = 5.0f;
         {
             std::lock_guard lock(g_mutex);
-            want_wet = (g_cfg.weather == "Wet");
+            weather = g_cfg.weather;
+            want_wet = (weather == "Wet");
             tod = g_cfg.time_of_day;
+            laps = g_cfg.laps;
         }
         if (tod > 0 && tod < kTimesOfDayCount) {
             uint8_t preset = uint8_t(kTimesOfDay[tod].preset);
@@ -874,18 +921,33 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
             settings[0xb19] = preset;
             for (int d = 0; d < 8; ++d) settings[0xb28 + d * 8] = preset;
         }
-        uint8_t type = want_wet ? 4 : 0;
-        *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;
-        for (int d = 0; d < 8; ++d) {
-            uint8_t *slot = settings + 0xb74 + d * 0x44;
-            *reinterpret_cast<uint32_t *>(slot + 4) = 1;
-            for (int k = 0; k < 6; ++k) {
-                slot[0x38 + k] = 0;
-                slot[0x3e + k] = type;
+        uint8_t *race_slot = settings + 0xb74 + 5 * 0x44;
+        ilog("[instant-race] Weather: game had exact %u, mode %u, race dataset length %.0f s, %u state(s)",
+             unsigned(settings[0xb18]), *reinterpret_cast<uint32_t *>(settings + 0xb14),
+             *reinterpret_cast<float *>(race_slot), *reinterpret_cast<uint32_t *>(race_slot + 4));
+        if (weather == "Dry to Wet" || weather == "Wet to Dry") {
+            bool to_wet = weather == "Dry to Wet";
+            write_weather_script(settings, to_wet ? kDryToWet : kWetToDry, 4, laps);
+            float race_s = std::max(1.0f, laps) * kSecondsPerLap;
+            float change = (to_wet ? kDryToWet[0].hold : kWetToDry[0].hold) * race_s;
+            ilog("[instant-race] Session weather scripted %s over ~%.0f s: first change after %.0f s (about lap %.0f), start time %s",
+                 to_wet ? "clear -> overcast -> light rain -> heavy rain" : "heavy rain -> light rain -> overcast -> clear",
+                 race_s, change, std::floor(change / kSecondsPerLap) + 1.0f, time_of_day_label(tod));
+        } else {
+            uint8_t type = want_wet ? 4 : 0;
+            settings[0xb18] = 0;
+            *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;
+            for (int d = 0; d < 8; ++d) {
+                uint8_t *slot = settings + 0xb74 + d * 0x44;
+                *reinterpret_cast<uint32_t *>(slot + 4) = 1;
+                for (int k = 0; k < 6; ++k) {
+                    slot[0x38 + k] = 0;
+                    slot[0x3e + k] = type;
+                }
             }
+            ilog("[instant-race] Session weather set to %s (all datasets, custom slot), start time %s", want_wet ? "heavy rain" : "clear",
+                 time_of_day_label(tod));
         }
-        ilog("[instant-race] Session weather set to %s (all datasets, custom slot), start time %s", want_wet ? "heavy rain" : "clear",
-             time_of_day_label(tod));
     }
     if (orig_weather_setup) orig_weather_setup(ws, settings, config);
     // What the game made of it: GameWeatherSystem +0x1ec8/+0x1ecc = start hour/minute of the session being set up,
@@ -2502,10 +2564,12 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     // 4. Weather
     std::snprintf(buf, sizeof(buf), "Weather:        %s", g_cfg.weather.c_str());
     if (ui::button(u, {body.x, y, main_w, h}, buf)) {
-        g_cfg.weather = (g_cfg.weather == "Dry") ? "Wet" : "Dry";
+        g_cfg.weather = next_weather(g_cfg.weather);
     }
-    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Flip Weather")) {
-        g_cfg.weather = (g_cfg.weather == "Dry") ? "Wet" : "Dry";
+    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Reroll Weather")) {
+        std::uniform_int_distribution<int> wpick(0, kWeathersCount - 1);
+        std::string was = g_cfg.weather;
+        while (g_cfg.weather == was) g_cfg.weather = kWeathers[wpick(g_rng)];
     }
     y += h + gap;
 
