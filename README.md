@@ -4,10 +4,10 @@ Skip the menus and jump straight into a race in F1 25 (Swofty Launcher addon).
 
 ## How to use
 1. Press **F7** on the main menu (you can change the key in the addon's settings).
-2. Pick an era, car and driver, track, weather and race length, or press **Roll All Random**.
+2. Pick an era, car and driver, track, weather, time of day and race length, or press **Roll All Random**.
 3. Press **START INSTANT RACE**.
 
-**Surprise mode:** turn on **Surprise** and the era, car and driver, circuit and weather are picked at random and kept hidden until the race loads. Race length still uses your setting.
+**Surprise mode:** turn on **Surprise** and the era, car and driver, circuit, weather and time of day are picked at random and kept hidden until the race loads. Race length still uses your setting.
 
 Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the era list automatically, and installed track addons appear in the circuit list. The Swofty season packs provide the period grids, cars and liveries.
 

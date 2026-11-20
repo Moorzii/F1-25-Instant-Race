@@ -22,11 +22,16 @@ On some loads every car spawns on the start/finish line instead of its grid slot
 - Swofty 1.10.0 (20 Nov) skips the game's 3 s minimum loading screen. If the ghost grid is a timing race with the menu
   scene, it may now show up more or less often: note the launcher version with every ghosted report.
 
-## 1. Time of day
-Let players pick the race start time (or random).
-- Same hook as the weather fix: `Sess_GameWeatherSystem_SetupSession` reads `WeatherSessionSettings`.
-- Start-time fields (Swofty RE, `re/db/structs/WeatherSessionSettings.h`): `tod_flag_a` +0xb10 / `tod_flag_b` +0xb11 (both 0 = use the per-dataset start presets), per-dataset block at +0xb28 + d*8 (u8 start preset 0..7), `tod_start_preset` +0xb19.
-- Some tracks may only allow fixed times (night races); check what the game does with each preset.
+## 1. Time of day (in progress, on `next`)
+Race start time: Track Default, Sunrise, Morning, Midday, Afternoon, Sunset, Night; also in Roll All and Surprise.
+- Set in the weather hook: WeatherSessionSettings +0xb10/+0xb11 cleared, +0xb19 and +0xb28 + d*8 = preset.
+  GameWeatherSystem::setupSession (0x1438b98e0 on this build) maps the preset: 0 = A-1h, 1 = A, 2 = (A+midday)/2,
+  3 = midday, 4 = (midday+B)/2, 5 = B, 6 = B+1h, 7 = 00:00, where A/B are the track's two preset times (track weather
+  config +0x10/+0x18, e.g. Silverstone 4.75/19.25) and midday is from the solar calc. Result at +0x1ec8/+0x1ecc.
+- Tested 20 Nov: Sunset works at Silverstone; Night (00:00) works at Losail (floodlights) but shows sunset at
+  Silverstone. Track weather config +0x29d is the night-lighting flag (1 at Losail, 0 at Silverstone), so Night falls
+  back to Sunset where it is 0. Preset 6 (B+1h) dropped: at Silverstone it lands on the real sunset (20:05).
+- Still to check: the day presets at a floodlit track (its A/B times are stored as -1 in GameWeatherSystem).
 
 ## 2. More season packs in the era list
 Support the GP/TT packs (e.g. "F1 2015 GP/TT Addon") and Classic Seasons, not only Swofty's own `sw_f1_<year>` grids.

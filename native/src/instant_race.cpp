@@ -421,14 +421,17 @@ struct RaceConfig {
 // Race start time. preset = the game's start-time preset in WeatherSessionSettings (-1 = leave the game's own choice).
 // GameWeatherSystem::setupSession takes, with +0xb10 and +0xb11 both clear, the start preset of each dataset from
 // +0xb28 + d*8 and of the session being set up from +0xb19, and turns it into a time from the track's solar times:
-// 1 = sunrise, 2 = morning, 3 = midday, 4 = afternoon, 5 = sunset, 6 = after sunset, 7 = midnight.
+// 1 = the track's dawn time, 2 = morning, 3 = midday, 4 = afternoon, 5 = the track's sunset time, 6 = an hour later,
+// 7 = midnight. Midnight only renders at tracks with night lighting (track weather config +0x29d set: Bahrain, Jeddah,
+// Singapore, Las Vegas, Qatar, Abu Dhabi); elsewhere the game shows sunset, so Night falls back to Sunset there.
+// Preset 6 is left out: at a day track it lands on the real sunset and looks the same as preset 5.
 struct TimeOfDayChoice {
     const char *label;
     int preset;
 };
 constexpr TimeOfDayChoice kTimesOfDay[] = {
     {"Track Default", -1}, {"Sunrise", 1}, {"Morning", 2}, {"Midday", 3},
-    {"Afternoon", 4},      {"Sunset", 5},  {"Dusk", 6},    {"Night", 7},
+    {"Afternoon", 4},      {"Sunset", 5},  {"Night", 7},
 };
 constexpr int kTimesOfDayCount = int(sizeof(kTimesOfDay) / sizeof(kTimesOfDay[0]));
 const char *time_of_day_label(int i) { return kTimesOfDay[(i >= 0 && i < kTimesOfDayCount) ? i : 0].label; }
@@ -856,6 +859,13 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
         }
         if (tod > 0 && tod < kTimesOfDayCount) {
             uint8_t preset = uint8_t(kTimesOfDay[tod].preset);
+            uint8_t *track_cfg = nullptr;
+            if (config && swofty::mem::readable(config, 8)) track_cfg = *static_cast<uint8_t **>(config);
+            bool night_lighting = track_cfg && swofty::mem::readable(track_cfg + 0x29d, 1) && track_cfg[0x29d] != 0;
+            if (preset == 7 && !night_lighting) {
+                preset = 5;
+                ilog("[instant-race] Start time: this track has no night lighting, using Sunset instead of Night");
+            }
             ilog("[instant-race] Start time: game had flags %u/%u, session preset %u, race preset %u; setting %s (preset %u)",
                  unsigned(settings[0xb10]), unsigned(settings[0xb11]), unsigned(settings[0xb19]),
                  unsigned(settings[0xb28 + 5 * 8]), kTimesOfDay[tod].label, unsigned(preset));
@@ -878,6 +888,16 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
              time_of_day_label(tod));
     }
     if (orig_weather_setup) orig_weather_setup(ws, settings, config);
+    // What the game made of it: GameWeatherSystem +0x1ec8/+0x1ecc = start hour/minute of the session being set up,
+    // +0x1e94 / +0x1eac = the track's sunrise / sunset (hours).
+    if (st != static_cast<int>(LaunchStage::idle) && ws && settings &&
+        swofty::mem::readable(static_cast<uint8_t *>(ws) + 0x1e94, 0x40)) {
+        auto *w = static_cast<uint8_t *>(ws);
+        ilog("[instant-race] Session %u starts at %02d:%02d (sunrise %.2f, sunset %.2f)",
+             unsigned(*reinterpret_cast<uint32_t *>(settings + 4)), *reinterpret_cast<int *>(w + 0x1ec8),
+             *reinterpret_cast<int *>(w + 0x1ecc), *reinterpret_cast<float *>(w + 0x1e94),
+             *reinterpret_cast<float *>(w + 0x1eac));
+    }
 }
 
 // --- Flow State Machine Hook (scanned dynamically) ---
@@ -2490,7 +2510,8 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     y += h + gap;
 
     // 5. Time of day
-    std::snprintf(buf, sizeof(buf), "Time of Day:    %s", time_of_day_label(g_cfg.time_of_day));
+    std::snprintf(buf, sizeof(buf), "Time of Day:    %s%s", time_of_day_label(g_cfg.time_of_day),
+                  kTimesOfDay[g_cfg.time_of_day].preset == 7 ? "  (floodlit tracks; sunset elsewhere)" : "");
     if (ui::button(u, {body.x, y, main_w, h}, buf)) {
         g_cfg.time_of_day = (g_cfg.time_of_day + 1) % kTimesOfDayCount;
     }
