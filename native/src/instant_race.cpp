@@ -412,10 +412,26 @@ struct RaceConfig {
     std::string track_id = "silverstone";
     std::string track_label = "Silverstone";
     std::string weather = "Dry";
+    int time_of_day = 0; // index into kTimesOfDay (0 = the track's default)
     float laps = 5.0f;
     float ai_difficulty = 85.0f;
     bool surprise = false; // hide era/car/track/weather and roll them at Start
 };
+
+// Race start time. preset = the game's start-time preset in WeatherSessionSettings (-1 = leave the game's own choice).
+// GameWeatherSystem::setupSession takes, with +0xb10 and +0xb11 both clear, the start preset of each dataset from
+// +0xb28 + d*8 and of the session being set up from +0xb19, and turns it into a time from the track's solar times:
+// 1 = sunrise, 2 = morning, 3 = midday, 4 = afternoon, 5 = sunset, 6 = after sunset, 7 = midnight.
+struct TimeOfDayChoice {
+    const char *label;
+    int preset;
+};
+constexpr TimeOfDayChoice kTimesOfDay[] = {
+    {"Track Default", -1}, {"Sunrise", 1}, {"Morning", 2}, {"Midday", 3},
+    {"Afternoon", 4},      {"Sunset", 5},  {"Dusk", 6},    {"Night", 7},
+};
+constexpr int kTimesOfDayCount = int(sizeof(kTimesOfDay) / sizeof(kTimesOfDay[0]));
+const char *time_of_day_label(int i) { return kTimesOfDay[(i >= 0 && i < kTimesOfDayCount) ? i : 0].label; }
 
 std::mutex g_mutex;
 RaceConfig g_cfg;
@@ -792,6 +808,8 @@ void randomize_all() {
     reroll_track();
     std::uniform_int_distribution<int> wdist(0, 3);
     g_cfg.weather = (wdist(g_rng) == 0) ? "Wet" : "Dry";
+    std::uniform_int_distribution<int> tdist(0, kTimesOfDayCount - 1);
+    g_cfg.time_of_day = tdist(g_rng);
 }
 
 // --- Hooks for Laps & Weather ---
@@ -830,9 +848,21 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
     int st = g_stage.load();
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xb74 + 8 * 0x44)) {
         bool want_wet = false;
+        int tod = 0;
         {
             std::lock_guard lock(g_mutex);
             want_wet = (g_cfg.weather == "Wet");
+            tod = g_cfg.time_of_day;
+        }
+        if (tod > 0 && tod < kTimesOfDayCount) {
+            uint8_t preset = uint8_t(kTimesOfDay[tod].preset);
+            ilog("[instant-race] Start time: game had flags %u/%u, session preset %u, race preset %u; setting %s (preset %u)",
+                 unsigned(settings[0xb10]), unsigned(settings[0xb11]), unsigned(settings[0xb19]),
+                 unsigned(settings[0xb28 + 5 * 8]), kTimesOfDay[tod].label, unsigned(preset));
+            settings[0xb10] = 0; // not the game's per-session-type times
+            settings[0xb11] = 0; // not a random pick
+            settings[0xb19] = preset;
+            for (int d = 0; d < 8; ++d) settings[0xb28 + d * 8] = preset;
         }
         uint8_t type = want_wet ? 4 : 0;
         *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;
@@ -844,7 +874,8 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
                 slot[0x3e + k] = type;
             }
         }
-        ilog("[instant-race] Session weather set to %s (all datasets, custom slot)", want_wet ? "heavy rain" : "clear");
+        ilog("[instant-race] Session weather set to %s (all datasets, custom slot), start time %s", want_wet ? "heavy rain" : "clear",
+             time_of_day_label(tod));
     }
     if (orig_weather_setup) orig_weather_setup(ws, settings, config);
 }
@@ -2252,7 +2283,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.4 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.4 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2299,15 +2330,16 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
         float sw = 0, sh = 0;
         size(paint, &sw, &sh);
         rect(paint, 0, 0, sw, sh, 0x0B0D12FF);
-        Rect card{(sw - u.u(540.0f)) * 0.5f, (sh - u.u(210.0f)) * 0.5f, u.u(540.0f), u.u(210.0f)};
+        Rect card{(sw - u.u(640.0f)) * 0.5f, (sh - u.u(210.0f)) * 0.5f, u.u(640.0f), u.u(210.0f)};
         Rect body = ui::panel(u, card, "INSTANT RACE  -  LOADING GRAND PRIX");
         char line1[256], line2[256], line3[256];
         bool hide = g_cfg.surprise;
         std::snprintf(line1, sizeof(line1), "Season / Era:   %s", hide ? "???" : g_cfg.era_label.c_str());
         if (hide) std::snprintf(line2, sizeof(line2), "Car & Driver:   ???  -  Surprise!");
         else std::snprintf(line2, sizeof(line2), "Car & Driver:   %s  -  %s", g_cfg.team_label.c_str(), g_cfg.driver_label.c_str());
-        std::snprintf(line3, sizeof(line3), "Circuit & Race: %s  |  %.0f Laps  |  %s",
-                      hide ? "???" : g_cfg.track_label.c_str(), g_cfg.laps, hide ? "???" : g_cfg.weather.c_str());
+        std::snprintf(line3, sizeof(line3), "Circuit & Race: %s  |  %.0f Laps  |  %s  |  %s",
+                      hide ? "???" : g_cfg.track_label.c_str(), g_cfg.laps, hide ? "???" : g_cfg.weather.c_str(),
+                      hide ? "???" : time_of_day_label(g_cfg.time_of_day));
         float ly = body.y + u.u(6.0f);
         ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line1, u.th.text); ly += u.u(30.0f);
         ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line2, u.th.text); ly += u.u(30.0f);
@@ -2384,7 +2416,7 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     if (g_cfg.surprise) {
         ui::label(u, {body.x, y, body.w, h}, "SURPRISE MODE IS ON", u.th.text);
         y += h + gap;
-        ui::label(u, {body.x, y, body.w, h}, "Era, car & driver, circuit and weather are picked at random when you press Start.", u.th.dim);
+        ui::label(u, {body.x, y, body.w, h}, "Era, car & driver, circuit, weather and time of day are picked at random when you press Start.", u.th.dim);
         y += h + gap;
         ui::label(u, {body.x, y, body.w, h}, "You'll find out what you got when the race loads. Your race length below still applies.", u.th.dim);
         y += (h + gap) * 2;
@@ -2454,6 +2486,17 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     }
     if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Flip Weather")) {
         g_cfg.weather = (g_cfg.weather == "Dry") ? "Wet" : "Dry";
+    }
+    y += h + gap;
+
+    // 5. Time of day
+    std::snprintf(buf, sizeof(buf), "Time of Day:    %s", time_of_day_label(g_cfg.time_of_day));
+    if (ui::button(u, {body.x, y, main_w, h}, buf)) {
+        g_cfg.time_of_day = (g_cfg.time_of_day + 1) % kTimesOfDayCount;
+    }
+    if (ui::button(u, {body.x + main_w + gap, y, reroll_w, h}, "Reroll Time")) {
+        std::uniform_int_distribution<int> tdist(1, kTimesOfDayCount - 1);
+        g_cfg.time_of_day = tdist(g_rng);
     }
     y += h + gap;
 
