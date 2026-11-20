@@ -53,10 +53,17 @@ Option to choose where the player starts (P1 to the back), or random.
 
 ## Smaller items
 - (Done in 1.0.3) Ultrawide / triple screens: the "[F7] Instant Race" prompt is drawn at the far right of the whole display, while the game draws its menus in a centred 16:9 area (seen on 7680x1440). Anchor the prompt (and check the menu panel and loading card) to that centred 16:9 area: when width/height > 16/9, use x0 = (width - height*16/9) / 2 and w = height*16/9.
-- Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`).
+- Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`). (HRT and Toro Rosso cases fixed in `next`.)
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.
 
 ## Player reports to look at
 - **Tyre strategy and fuel (reported 20 Nov):** a player could not change their tyre strategy and their car was under-fuelled. Likely the race-only weekend / custom lap count not reaching the game's fuel and strategy setup. Need their instant_race.log, session folder, and the era/track/race length.
 - **Crash while loading (Racingfox2309, 1.0.3):** 2026 season, Silverstone reverse layout, Toro Rosso. Null call at F1_25.exe+0x2cf07f2, 16 s into loading, no Instant Race frame on the stack, not repeated (their 2024 Zandvoort and 2019 Hockenheim races loaded and finished). Check whether the reverse layout or the 2026 grid is involved.
-- **Team alias oddity (same player):** asking for Aston Martin at 2024 Zandvoort seated them at Force India. The Racing Point/Force India slot alias for Aston Martin is applied where the era's grid may have its own Aston Martin entry; check the alias order for 2021+ seasons.
+- **Aston Martin seated at "Force India" (same player): not a bug.** Swofty's 2021+ grids keep Aston Martin in the
+  Force India slot (sw24_force_india is the 2024 Aston Martin: Stroll/Alonso; the 2024 grid has no other candidate).
+  The one real wrong-car case (2022 Aston Martin -> Mercedes on 19 Nov 00:44) was a dev build from before the slot aliases.
+- **Fixed in `next`:** HRT (2012) put you in the Caterham (3-letter team names were never matched; now an exact
+  slot-name match on the team's first word). 2013/2016 Toro Rosso could put you in the Ferrari (the game's ids spell it
+  "torro_rosso"; alias added). Checked with a simulation of the matcher over 29 real team ids: no other pick changes.
+- **Unverified:** the 2024 RB team's f1cg id never appears in the logs; if it is "rb-...", it would fall back to another
+  car. Needs one log line with that pick.

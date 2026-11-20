@@ -1599,9 +1599,26 @@ void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, co
             if (score > best) { best = score; seat = r; }
         }
         if (best < 3) {
-            // The team name itself didn't match (at best an engine supplier did): try the slot aliases first.
+            // The team name itself didn't match (at best an engine supplier did).
             uint8_t *engine_only = seat;
             seat = nullptr;
+            // A team whose name is shorter than the 4-letter token minimum (HRT: f1cg_f1_2012_hrt-cosworth) is never
+            // scored above: match its first word exactly against the entrant's slot name (sw12_hrt -> "hrt").
+            // Only the first word (the team), never the engine supplier after it.
+            std::string first_word;
+            for (char ch : tail) {
+                if (ch == '_' || ch == '-' || ch == ' ') break;
+                first_word += char(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            for (size_t i = 0; first_word.size() >= 3 && i < n && !seat; ++i) {
+                uint8_t *r = begin[0] + i * ENTRANT_SIZE;
+                if (r[0x4b] & 0x10) continue;
+                std::string t_str = r[0x58] ? "" : teams[*reinterpret_cast<uint16_t *>(r + 0x5a)];
+                size_t us = t_str.find('_');
+                if (us != std::string::npos && t_str.substr(us + 1) == first_word) seat = r;
+            }
+            if (seat) ilog("[instant-race] Team slot by exact name '%s': found", first_word.c_str());
+            // Then the slot aliases.
             // Swofty season lists keep each team in its modern "slot": Marussia/Manor/Virgin in the Haas slot,
             // Renault/Alpine in the Lotus slot, Racing Point/Aston Martin in Force India's, AlphaTauri/RB in Toro
             // Rosso's, Alfa Romeo/Kick in Sauber's (e.g. sw13_haas is the 2013 Marussia, sw18_lotus the 2018 Renault).
@@ -1610,6 +1627,7 @@ void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, co
                 {"renault", "lotus"}, {"alpine", "lotus"},
                 {"point", "force"}, {"aston", "force"},
                 {"alphatauri", "toro"}, {"tauri", "toro"}, {"visa", "toro"},
+                {"torro", "toro"},  // the game's own 2013/2016 ids spell it "torro_rosso"
                 {"alfa", "sauber"}, {"kick", "sauber"}, {"stake", "sauber"},
             };
             const char *slot = nullptr;
