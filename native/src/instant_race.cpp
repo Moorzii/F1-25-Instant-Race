@@ -94,6 +94,15 @@ constexpr size_t MAIN_SPAWNED              = 0x1048;
 constexpr uint32_t STATE_APP               = 0xe11edb87;
 constexpr uint32_t STATE_FRONTEND_WORLD    = 0x290b11ae;
 constexpr uint32_t STATE_FRONTEND          = 0x957880c6;
+// The menu's exit latches. Instant Race leaves the menu by the game's exit interrupt (eInterruptExit), which normally
+// means quitting the game, so the game never resets what it latches on the way out. Both are cleared at each launch:
+// - StateFrontendWorld +0xdc0: non-zero makes StateFrontendWorld::onStateUpdate return eLinkExit, so every later menu
+//   exit (career, Grand Prix, another Instant Race) unwound the whole game flow (black screen).
+// - StateFrontend +0xf90 bit 0x08: StateFrontend::onStateInterrupt requests the "ClosingGame" fade-out only while it is
+//   clear, so a second Instant Race waited forever for a fade that never came.
+constexpr size_t   FW_EXIT_FLAG            = 0xdc0;
+constexpr size_t   FE_INTERRUPT_FLAGS      = 0xf90;
+constexpr uint8_t  FE_CLOSING_GAME         = 0x08;
 constexpr uint32_t STATE_LOAD_SESSION      = 0x17e3cd0a;
 constexpr uint32_t STATE_SESSION           = 0x1505f42a;
 constexpr uint32_t LINK_STAY               = 0;
@@ -429,7 +438,7 @@ bool g_fade_released = false;
 bool g_scene_despawned = false;
 std::atomic<uint8_t *> g_flow_root{nullptr};
 bool g_flow_hook_installed = false;
-bool g_raced_once = false; // known limitation: a second launch in one game session hangs on the menu
+bool g_raced_once = false; // an Instant Race has run in this game session (log only)
 
 std::mt19937 g_rng{static_cast<unsigned>(GetTickCount64())};
 
@@ -612,6 +621,9 @@ std::vector<TrackInfo> get_installed_tracks() {
             id.find("frontend") != std::string::npos || id.find("generic") != std::string::npos) {
             return;
         }
+        // A spare slot the Fuji Speedway add-on maps into; Swofty logs that it doesn't resolve, and it loads a
+        // half-built track at ~1 fps with no way back to the menu.
+        if (id == "suzuka24") return;
         if (!is_mounted(id)) return;
         for (const auto &t : out) {
             if (t.id == id) return;
@@ -838,6 +850,26 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
 }
 
 // --- Flow State Machine Hook (scanned dynamically) ---
+std::atomic<uint8_t *> g_fe_node{nullptr};
+std::atomic<uint8_t *> g_fw_node{nullptr};
+
+uint8_t *find_flow_node(uint32_t want);
+
+void clear_menu_exit_latches() {
+    if (uint8_t *fw = g_fw_node.load(); fw && swofty::mem::readable(fw + FW_EXIT_FLAG, 1) &&
+        *reinterpret_cast<uint32_t *>(fw + STATE_HASH) == STATE_FRONTEND_WORLD && fw[FW_EXIT_FLAG]) {
+        fw[FW_EXIT_FLAG] = 0;
+        ilog("[instant-race] Menu world exit flag cleared");
+    }
+    uint8_t *fe = g_fe_node.load();
+    if (!fe) fe = find_flow_node(STATE_FRONTEND);
+    if (fe && swofty::mem::readable(fe + FE_INTERRUPT_FLAGS, 1) &&
+        *reinterpret_cast<uint32_t *>(fe + STATE_HASH) == STATE_FRONTEND && (fe[FE_INTERRUPT_FLAGS] & FE_CLOSING_GAME)) {
+        fe[FE_INTERRUPT_FLAGS] = uint8_t(fe[FE_INTERRUPT_FLAGS] & ~FE_CLOSING_GAME);
+        ilog("[instant-race] Menu closing-game latch cleared");
+    }
+}
+
 uint8_t *find_flow_node(uint32_t want) {
     uint8_t *root = g_flow_root.load();
     if (!root) return nullptr;
@@ -1194,6 +1226,7 @@ extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link)
         g_flow_root.store(state);
     }
     // Only mark main menu ready when STATE_FRONTEND (0x957880c6) itself is updating in active state (status == 2)
+    if (hash == STATE_FRONTEND) g_fe_node.store(state);
     if (hash == STATE_FRONTEND && *reinterpret_cast<uint8_t *>(state + STATE_STATUS) == 2) {
         g_frontend_seen_ms.store(GetTickCount64());
         int cur_st = g_stage.load();
@@ -1257,6 +1290,8 @@ extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link)
                     if (*qtype == 0xe) *qtype = 0;
                 }
             }
+            g_fw_node.store(state);
+            clear_menu_exit_latches();
             swofty::log("[instant-race] StateFrontendWorld has no child -> returning DS_LINK_SESSION (%08x)!", DS_LINK_SESSION);
             g_stage.store(static_cast<int>(LaunchStage::loading_session));
             g_stage_ts = GetTickCount64();
@@ -1305,6 +1340,7 @@ extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link)
             release_fade_mask();
             g_stage.store(static_cast<int>(LaunchStage::done));
             g_raced_once = true;
+            clear_menu_exit_latches();
             ilog("[instant-race] Session active! Handover complete.");
         }
     } else if (st == static_cast<int>(LaunchStage::done)) {
@@ -2199,11 +2235,7 @@ uint32_t toggle_vk() {
 }
 
 void trigger_launch() {
-    if (g_raced_once) {
-        ilog("[instant-race] Launch blocked: already raced this game session (restart required)");
-        swofty::overlay::ui::toast(g_ui_state, "Restart the game to start another Instant Race (known limitation).");
-        return;
-    }
+    if (g_raced_once) ilog("[instant-race] Another Instant Race in this game session");
     if (g_cfg.surprise) randomize_all();
     g_menu_open = false;
     swofty::overlay::focus(false);
@@ -2220,7 +2252,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.3 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.4 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2517,7 +2549,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.3 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.4 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)

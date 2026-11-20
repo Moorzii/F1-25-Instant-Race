@@ -64,9 +64,9 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
 - Cause: StateFrontend::onStateInterrupt (0x1436d70a0) handles eInterruptExit (0xe, jump table at 0x14587644c) by
   requesting the "ClosingGame" fade-out (fade mask bit 0x80000000, the bit Instant Race clears by hand) only when bit
   0x08 of StateFrontend+0xf90 is clear, then sets that bit. Nothing clears it, so the second exit gets no fade.
-- Next (fix3c, native/src/instant_race_fix3c.cpp on the dev PC): also clear StateFrontend+0xf90 bit 0x08 at the launch
-  override and at the handover. Test: two Instant Races in one game session, then career. If it works, everything goes
-  into 1.0.4 and the README's known limitation goes.
+- **Fixed (fix3c, tested 20 Nov 20:48):** two Instant Races in one game session, then career, all worked; both
+  latches logged as set (+0xdc0 = 1, +0xf90 = 0x0a) and were cleared at each launch. In 1.0.4 as
+  clear_menu_exit_latches(), and the second-launch block is removed.
 - The menu fade bit 0x80000000 that Instant Race clears by hand is the "ClosingGame" fade reason (see above). 
 - Swofty's own direct start (launcher 1.9.91, native/src/core/direct_start.cpp) raises the same interrupt only on
   StateFTUE as it leaves, and clears it the moment StateFTUE's onStateExit finishes, so its parents never see it.
