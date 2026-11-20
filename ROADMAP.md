@@ -11,6 +11,10 @@ On some loads every car spawns on the start/finish line instead of its grid slot
   and 01:00 on 19 Nov gave one bad and one good run). Only after-effects differ (lap event at spawn, no grid player shot).
 - Tried and ruled out: race session state (+0x10 = 1), the grid builders (SetupStartingGrid / DriverBasedGrid output is
   empty on good and bad loads alike), rebuilding the weekend.
+- Lead from Swofty's direct start: it holds the interrupt exit so the menu's main scene (and its PhysicsTerrain) is
+  gone before the track's is created. If the menu scene is sometimes still there when the cars are placed, placement
+  could fall back to the line, and timing would make it intermittent. The fix2 test build logs the menu scene's
+  spawned flags (StateFrontend +0xd20 -> +0x40 -> +0x1048/+0x1049) during the load and at grid placement.
 - Placement logging exists (Game_VehicleProgressSystem_OnVehiclePlacedOnGrid fires for all cars at the end of loading;
   Game_GridSlot_PlaceVehicle is not used for a Grand Prix). 4 good runs recorded on 20 Nov, no ghosted one yet: the
   next ghosted run with that logging is the comparison needed.
@@ -46,6 +50,11 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
   once it has no child. Test: launch works; then Instant Race -> menu -> career loads; then a second Instant Race.
 - The menu fade bit 0x80000000 that Instant Race clears by hand never appears in a normal Grand Prix or career start;
   it probably comes from the same interrupt exit. Check whether it still appears with fix2.
+- Swofty's own direct start (launcher 1.9.91, native/src/core/direct_start.cpp) raises the same interrupt only on
+  StateFTUE as it leaves, and clears it the moment StateFTUE's onStateExit finishes, so its parents never see it.
+  Instant Race raised it on the first state its hook saw (e4ef00ba, a parent) and kept it set for ~3 s until
+  StateFrontendWorld had no child, long enough for the parents to latch it. Fix2 drops it, which also matches a normal
+  career start (StateFrontend leaves by its exit link 0eef86be there too, with no interrupt).
 
 ## 5. Starting grid slot
 Option to choose where the player starts (P1 to the back), or random.
