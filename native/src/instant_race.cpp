@@ -856,46 +856,107 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
 // mode +0xb14 (0 = custom slot blocks), slots[8] at +0xb74 + d*0x44 (d = P1 P2 P3 Q SS R R2 R3), each
 // {f32 length, u32 count, f32 hold[6], f32 trans[6], u8 random[6] @+0x38, u8 type[6] @+0x3e}; type 0 clear .. 5 stormy.
 // Dry / Wet write one fixed state into every dataset (clear / heavy rain) through the custom-slot path.
-// Dry to Wet / Wet to Dry use the game's own scripted-weather path instead: with +0xb18 (exact timing) set,
-// setupSession builds every dataset straight from its slot block, holding each state hold_s seconds after a
-// trans_s-second transition into it (length = the sum; the last state holds to the end of the session).
+// Dry to Wet / Wet to Dry start the same way (the first state), then, after the game's build, rebuild each dataset
+// with the game's own builder (Sess_Tod_BuildSessionDataset_Thunk, the way Swofty's weather chain does it): state i
+// holds hold[i] s, then changes into state i + 1 over trans[i] s (>= 1 s); the last state holds to the end of the
+// session and its transition is 0. Rain is only scripted when the track's type range can draw it, and a build with a
+// non-finite state is replaced by one plain state.
 struct WeatherStep {
-    uint8_t type;   // 0 clear, 1 light cloud, 2 overcast, 3 light rain, 4 heavy rain, 5 storm
-    float trans;    // share of the race spent changing into this state
-    float hold;     // share of the race spent in it
+    uint8_t type; // 0 clear, 1 light cloud, 2 overcast, 3 light rain, 4 heavy rain, 5 storm
+    float hold;   // share of the race spent in it before the next change
+    float trans;  // share of the race spent changing into the next state
 };
-constexpr WeatherStep kDryToWet[] = {{0, 0.00f, 0.30f}, {2, 0.08f, 0.07f}, {3, 0.08f, 0.10f}, {4, 0.07f, 0.40f}};
-constexpr WeatherStep kWetToDry[] = {{4, 0.00f, 0.25f}, {3, 0.08f, 0.12f}, {2, 0.08f, 0.10f}, {0, 0.07f, 0.40f}};
+constexpr WeatherStep kDryToWet[] = {{0, 0.30f, 0.08f}, {2, 0.07f, 0.08f}, {3, 0.10f, 0.07f}, {4, 0.0f, 0.0f}};
+constexpr WeatherStep kWetToDry[] = {{4, 0.25f, 0.08f}, {3, 0.12f, 0.08f}, {2, 0.10f, 0.07f}, {0, 0.0f, 0.0f}};
 constexpr float kSecondsPerLap = 95.0f; // rough lap time incl. the start, to place the change mid-race
+const char *const kWeatherKinds[6] = {"clear", "light cloud", "overcast", "light rain", "heavy rain", "storm"};
 
-void write_weather_script(uint8_t *settings, const WeatherStep *steps, int n, float laps) {
-    float race_s = std::max(1.0f, laps) * kSecondsPerLap;
-    settings[0xb18] = 1;                                   // exact timing: build from hold/trans
-    *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;   // custom slots, not the realistic generator
-    for (int d = 0; d < 8; ++d) {
-        uint8_t *slot = settings + 0xb74 + d * 0x44;
-        float total = 0.0f;
-        for (int k = 0; k < 6; ++k) {
-            bool used = k < n;
-            float hold = used ? std::max(20.0f, steps[k].hold * race_s) : 0.0f;
-            float trans = (used && k > 0) ? std::max(20.0f, steps[k].trans * race_s) : 0.0f;
-            *reinterpret_cast<float *>(slot + 0x08 + k * 4) = hold;
-            *reinterpret_cast<float *>(slot + 0x20 + k * 4) = trans;
-            slot[0x38 + k] = 0;
-            slot[0x3e + k] = used ? steps[k].type : steps[n - 1].type;
-            total += hold + trans;
-        }
-        *reinterpret_cast<float *>(slot + 0x00) = total;
-        *reinterpret_cast<uint32_t *>(slot + 0x04) = uint32_t(n);
+using TodBuildFn = void(void *tod_owner, const uint8_t *types, const float *hold_s, const float *trans_s,
+                        const uint8_t *random, uint32_t count, float len_s, uint16_t session, uint8_t use_count);
+TodBuildFn *g_tod_build = nullptr;
+
+// GameWeatherSystem +0x1d98 TimeOfDaySystem*, +0x1da8 TimeOfDayOwner* (owner +0x2d0 = its TimeOfDaySystem),
+// +0x2f3a + d dataset_dynamic. TimeOfDaySystem: datasets at +0x26d8 + d*0xe00 (states at +0xb90, 16 bytes each:
+// u32 type, f32 intensity, f32 end, f32 transition; state_total +0xdf0), dataset_length[d] +0xb350 + d*4,
+// type ranges +0xb378 + t*0x14 (min +0xc, max +0x10), scripted_scenario +0x2654, exact_timing +0xb426,
+// ready +0xb429/+0xb42a, random override +0xb42d, busy +0xb432, override active +0xb436 (Swofty session.hpp).
+bool rebuild_dataset(uint8_t *ws, int d, const WeatherStep *steps, int n, float race_s, std::string &why) {
+    uint8_t *tod = nullptr, *owner = nullptr;
+    if (!swofty::mem::readable(ws + 0x1d98, 0x18) ||
+        !(tod = *reinterpret_cast<uint8_t **>(ws + 0x1d98)) || !(owner = *reinterpret_cast<uint8_t **>(ws + 0x1da8)) ||
+        !swofty::mem::readable(owner + 0x2d0, 8) || *reinterpret_cast<uint8_t **>(owner + 0x2d0) != tod ||
+        !swofty::mem::readable(tod, 0xb438) || !swofty::mem::readable(ws + 0x2f3a, 8)) {
+        why = "no TimeOfDaySystem";
+        return false;
     }
+    if (tod[0xb432]) { why = "TimeOfDaySystem busy"; return false; }
+    if (!tod[0xb429] || !tod[0xb42a]) { why = "TimeOfDaySystem not ready"; return false; }
+    if (tod[0xb436] && (tod[0xb42d] || tod[0x2654])) { why = "TimeOfDaySystem override active"; return false; }
+    for (int i = 0; i < n; ++i) {
+        uint8_t t = steps[i].type;
+        if (t < 3) continue;
+        float lo = *reinterpret_cast<float *>(tod + 0xb378 + t * 0x14 + 0xc);
+        float hi = *reinterpret_cast<float *>(tod + 0xb378 + t * 0x14 + 0x10);
+        if (!std::isfinite(lo) || !std::isfinite(hi) || lo < 0 || lo > hi || hi > 1 || hi <= 0) {
+            why = std::string("this track has no ") + kWeatherKinds[t];
+            return false;
+        }
+    }
+    float len = *reinterpret_cast<float *>(tod + 0xb350 + d * 4);
+    if (!std::isfinite(len) || len < 60.0f || len > 36000.0f) len = d >= 5 ? 7200.0f : 3600.0f;
+    uint8_t types[6] = {}, random[6] = {};
+    float hold[6] = {}, trans[6] = {};
+    float at = 0.0f;
+    int m = 0;
+    for (; m < n; ++m) {
+        types[m] = steps[m].type;
+        if (m + 1 == n) break;
+        float h = std::max(1.0f, steps[m].hold * race_s), t = std::max(1.0f, steps[m].trans * race_s);
+        if (at + h + t + 1.0f > len) break;
+        hold[m] = h;
+        trans[m] = t;
+        at += h + t;
+    }
+    int count = m + 1;
+    hold[count - 1] = std::max(1.0f, len - at);
+    trans[count - 1] = 0.0f;
+
+    uint8_t *set = tod + 0x26d8 + d * 0xe00;
+    int first = (*reinterpret_cast<uint32_t *>(set + 0xdf0)) ? int(*reinterpret_cast<uint32_t *>(set + 0xb90)) : -1;
+    auto finite = [&]() {
+        uint32_t total = std::min<uint32_t>(*reinterpret_cast<uint32_t *>(set + 0xdf0), 38);
+        for (uint32_t i = 0; i < total; ++i) {
+            const float *f = reinterpret_cast<const float *>(set + 0xb90 + i * 16 + 4);
+            for (int k = 0; k < 3; ++k)
+                if (!std::isfinite(f[k]) || f[k] < 0.0f) return false;
+            if (f[0] > 1.0f) return false;
+        }
+        return total > 0;
+    };
+    uint8_t exact = tod[0xb426];
+    tod[0xb426] = 1;
+    g_tod_build(owner, types, hold, trans, random, uint32_t(count), len, uint16_t(0x100 | d), 1);
+    bool ok = finite();
+    if (!ok) {
+        uint8_t plain = uint8_t(first >= 0 && first < 6 ? first : steps[0].type);
+        float one = len, zero = 0.0f;
+        g_tod_build(owner, &plain, &one, &zero, random, 1, len, uint16_t(0x100 | d), 1);
+    }
+    tod[0xb426] = exact;
+    ws[0x2f3a + d] = 0;
+    if (!ok) why = "the game built an invalid state; kept one plain state";
+    return ok;
 }
 
 void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
     int st = g_stage.load();
+    bool scripted = false, to_wet = false;
+    float race_s = 0.0f;
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xb74 + 8 * 0x44)) {
         bool want_wet = false;
         int tod = 0;
         std::string weather;
+        scripted = false;
         float laps = 5.0f;
         {
             std::lock_guard lock(g_mutex);
@@ -925,15 +986,13 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
         ilog("[instant-race] Weather: game had exact %u, mode %u, race dataset length %.0f s, %u state(s)",
              unsigned(settings[0xb18]), *reinterpret_cast<uint32_t *>(settings + 0xb14),
              *reinterpret_cast<float *>(race_slot), *reinterpret_cast<uint32_t *>(race_slot + 4));
-        if (weather == "Dry to Wet" || weather == "Wet to Dry") {
-            bool to_wet = weather == "Dry to Wet";
-            write_weather_script(settings, to_wet ? kDryToWet : kWetToDry, 4, laps);
-            float race_s = std::max(1.0f, laps) * kSecondsPerLap;
-            float change = (to_wet ? kDryToWet[0].hold : kWetToDry[0].hold) * race_s;
-            ilog("[instant-race] Session weather scripted %s over ~%.0f s: first change after %.0f s (about lap %.0f), start time %s",
-                 to_wet ? "clear -> overcast -> light rain -> heavy rain" : "heavy rain -> light rain -> overcast -> clear",
-                 race_s, change, std::floor(change / kSecondsPerLap) + 1.0f, time_of_day_label(tod));
-        } else {
+        scripted = (weather == "Dry to Wet" || weather == "Wet to Dry") && g_tod_build;
+        if (scripted) {
+            to_wet = weather == "Dry to Wet";
+            want_wet = !to_wet; // the race starts in its first state; the rebuild after the game's build adds the change
+            race_s = std::max(1.0f, laps) * kSecondsPerLap;
+        }
+        {
             uint8_t type = want_wet ? 4 : 0;
             settings[0xb18] = 0;
             *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;
@@ -950,6 +1009,23 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
         }
     }
     if (orig_weather_setup) orig_weather_setup(ws, settings, config);
+    if (scripted && ws) {
+        const WeatherStep *steps = to_wet ? kDryToWet : kWetToDry;
+        int built = 0;
+        std::string why;
+        for (int d = 0; d < 8; ++d) {
+            std::string w;
+            if (rebuild_dataset(static_cast<uint8_t *>(ws), d, steps, 4, race_s, w)) ++built;
+            else if (why.empty()) why = w;
+        }
+        if (built == 8)
+            ilog("[instant-race] Session weather scripted %s over ~%.0f s: first change after %.0f s (about lap %.0f)",
+                 to_wet ? "clear -> overcast -> light rain -> heavy rain" : "heavy rain -> light rain -> overcast -> clear",
+                 race_s, steps[0].hold * race_s, std::floor(steps[0].hold * race_s / kSecondsPerLap) + 1.0f);
+        else
+            ilog("[instant-race] Changing weather: %d/8 sessions scripted (%s); the rest stay %s", built, why.c_str(),
+                 to_wet ? "dry" : "wet");
+    }
     // What the game made of it: GameWeatherSystem +0x1ec8/+0x1ecc = start hour/minute of the session being set up,
     // +0x1e94 / +0x1eac = the track's sunrise / sunset (hours).
     if (st != static_cast<int>(LaunchStage::idle) && ws && settings &&
@@ -2632,6 +2708,8 @@ bool init_plugin() {
         }
     }
 
+    g_tod_build = reinterpret_cast<TodBuildFn *>(swofty::api->resolve("Sess_Tod_BuildSessionDataset_Thunk"));
+    if (!g_tod_build) swofty::log("[instant-race] Sess_Tod_BuildSessionDataset_Thunk not found: changing weather falls back to its first state");
     if (swofty::api->resolve("Sess_GameWeatherSystem_SetupSession") != 0) {
         swofty::detail::append(swofty::detail::mixins,
             new swofty::detail::node{
