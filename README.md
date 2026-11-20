@@ -11,7 +11,7 @@ Skip the menus and jump straight into a race in F1 25 (Swofty Launcher addon).
 
 Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the era list automatically, and installed track addons appear in the circuit list. The Swofty season packs provide the period grids, cars and liveries.
 
-## Known limitations (beta)
+## Known limitations
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
 - **Cars can occasionally spawn inside each other on the grid** when the race first loads. Restart the session from the pause menu and the grid lines up normally.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
@@ -19,7 +19,7 @@ Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the e
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
-**1.0.4**
+**1.0.4** (first full release)
 - You no longer need to restart the game after an Instant Race. Career, Grand Prix and another Instant Race now all start normally afterwards, instead of a black screen or a hang on the main menu.
 - Fixed HRT (2012) putting you in the Caterham, and Toro Rosso (2013 and 2016) sometimes putting you in the Ferrari.
 - The broken "suzuka24" circuit is no longer offered. It's a spare track slot that loaded at about 1 fps.
