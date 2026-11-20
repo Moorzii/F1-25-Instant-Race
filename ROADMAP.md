@@ -48,18 +48,25 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
 - Not the fix (tested 20 Nov, 03:20): fix2, which stopped raising eInterruptExit. StateFrontend went to status 3 and
   the menu scene despawned, but its exit never finished and no fade was requested; the launch timed out after 60 s on a
   black main menu. Instant Race's path needs the interrupt for StateFrontend to finish exiting.
-- Next (diag4, native/src/instant_race_diag4.cpp on the dev PC, read-only): 1.0.3 behaviour plus memory snapshots of
-  StateFrontendWorld, StateFrontend, e4ef00ba and 40b45c37 (0xd40 bytes each, written to
-  %LOCALAPPDATA%\Swofty\instant_race_snap_*.bin) on the menu at start-up, at the launch, on the menu after the race,
-  at the career start, and whenever StateFrontendWorld reports a new link. Diffing start-up vs after-race should show
-  the field that keeps the exit decision. Then decide between resetting that field and clearing the interrupt the
-  instant StateFrontend's onStateExit finishes (Swofty's FTUE approach).
+- Cause found (diag4, 20 Nov 03:50): StateFrontendWorld::onStateUpdate (0x1436d94e0) returns eLinkExit whenever its
+  byte +0xdc0 is set; the game's own TEMP_LOG strings ("FINISHED LINK:eLinkExit", ":session", ":story", ...) name each
+  branch. The exit interrupt sets that byte, and nothing clears it, since a menu exit normally quits the game. Instant
+  Race turns that exit into a race, so the byte stays set and every later menu exit leaves by eLinkExit. The object
+  itself (0x0..0xd40) was identical at start-up and after the race apart from the child pointer and timers.
+- Fix to test (fix3, native/src/instant_race_fix3.cpp on the dev PC): clear +0xdc0 when Instant Race sends
+  StateFrontendWorld to the session link, and again at the handover if it was set during the load. Test: Instant
+  Race -> menu -> career loads; then a second Instant Race in the same game session.
 - The menu fade bit 0x80000000 that Instant Race clears by hand never appears in a normal Grand Prix or career start;
   it probably comes from the same interrupt exit. 
 - Swofty's own direct start (launcher 1.9.91, native/src/core/direct_start.cpp) raises the same interrupt only on
   StateFTUE as it leaves, and clears it the moment StateFTUE's onStateExit finishes, so its parents never see it.
   Instant Race raised it on the first state its hook saw (e4ef00ba, a parent) and kept it set for ~3 s until
   StateFrontendWorld had no child, long enough for the parents to latch it.
+
+## 4b. Track slots that don't load (suzuka24)
+`suzuka24` is listed as a track but is a spare slot the Fuji Speedway add-on (dromodf.fuji-speedway) maps into; Swofty
+logs "/slot game/suzuka24 does not resolve in track". Picking it loaded a half-built track at 1 fps (20 Nov 03:35, no
+way back to the menu). Hide slots that don't resolve, or show them by the add-on's name when they do.
 
 ## 5. Starting grid slot
 Option to choose where the player starts (P1 to the back), or random.
