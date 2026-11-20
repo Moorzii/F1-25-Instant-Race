@@ -56,9 +56,12 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
   branch. The exit interrupt sets that byte, and nothing clears it, since a menu exit normally quits the game. Instant
   Race turns that exit into a race, so the byte stays set and every later menu exit leaves by eLinkExit. The object
   itself (0x0..0xd40) was identical at start-up and after the race apart from the child pointer and timers.
-- Fix to test (fix3, native/src/instant_race_fix3.cpp on the dev PC): clear +0xdc0 when Instant Race sends
-  StateFrontendWorld to the session link, and again at the handover if it was set during the load. Test: Instant
-  Race -> menu -> career loads; then a second Instant Race in the same game session.
+- **Fixed (fix3, tested 20 Nov 20:14):** clearing +0xdc0 when Instant Race sends StateFrontendWorld to the session
+  link. Log: flag was 1 at launch, cleared; after the race StateFrontendWorld reported the session link (8c23ce89,
+  flag 0) and career loaded.
+- Next (fix3b, native/src/instant_race_fix3b.cpp on the dev PC): drop the "restart the game" block on a second Instant
+  Race; the second-launch hang most likely had the same cause. Test: two Instant Races in one game session, then
+  career. If it works, both go into 1.0.4 and the README's known limitation goes.
 - The menu fade bit 0x80000000 that Instant Race clears by hand never appears in a normal Grand Prix or career start;
   it probably comes from the same interrupt exit. 
 - Swofty's own direct start (launcher 1.9.91, native/src/core/direct_start.cpp) raises the same interrupt only on
@@ -99,3 +102,6 @@ Option to choose where the player starts (P1 to the back), or random.
   our own weather hook and give real changing weather), tyre damage and pit lane (for the tyre strategy / fuel report),
   race control and standings.
 - None of Instant Race's bindings are on the deprecated list.
+- 1.10.1-1.10.11: nothing affecting Instant Race. 1.10.2 removed the three deprecated bindings (not used by us).
+  1.10.8 adds `live::car_detail` (tyre wear, tyre age, stint laps, lap and sector times, grid position) on Steam: useful
+  for the tyre strategy / fuel report.
