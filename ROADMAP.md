@@ -33,6 +33,20 @@ Race start time: Track Default, Sunrise, Morning, Midday, Afternoon, Sunset, Nig
   back to Sunset where it is 0. Preset 6 (B+1h) dropped: at Silverstone it lands on the real sunset (20:05).
 - Checked 20 Nov (tod3): Afternoon at Singapore starts 14:43 and looks right; Night at Silverstone falls back to Sunset (19:15).
 
+## 1b. Changing weather (parked, code on `next` but not offered in the menu)
+Dry to Wet / Wet to Dry. Two routes tried, both give an all-white screen on the grid (Bahrain, 20 Nov):
+- wx1: scripted slots through setupSession's exact-timing path (+0xb18). Bug: trans[i] is the change OUT of state i
+  (into i + 1), not into it, so the first change was 0 s.
+- wx2/wx3: the game builds the first state, then each dataset is rebuilt with Sess_Tod_BuildSessionDataset_Thunk the
+  way Swofty's weather chain does (hold/trans >= 1 s, last state to the end, rain-range check, finite check). The
+  rebuilt race dataset looked right (clear / overcast / light rain 0.33 / heavy rain 0.66, len 1800) and still went
+  white, even with Track Default time. Bahrain Afternoon Dry alone is fine. Swofty ships its chain off by default
+  (SWOFTY_WEATHER_CHAIN=1), possibly for the same reason.
+- Next idea: the game's own Grand Prix custom weather, i.e. the non-exact custom-slot path (+0xb14 = 0, count > 1,
+  types per state, no hold/trans) that setupSession builds at 0x1438ba590; it takes the dataset length from the slot
+  (+0x00) or per-session constants, so the race slot needs a sensible length (the game's race dataset was 1800 s).
+- Release plan: 1.0.5 (time of day) is on hold for now.
+
 ## 2. More season packs in the era list
 Support the GP/TT packs (e.g. "F1 2015 GP/TT Addon") and Classic Seasons, not only Swofty's own `sw_f1_<year>` grids.
 - Need one player log with those packs installed to see their entrant list names.
@@ -88,6 +102,8 @@ Option to choose where the player starts (P1 to the back), or random.
 - Swofty docs: `session.grid.build` event (`Game_GridSetup_SetupStartingGrid`) and the grid placement functions in `std/systems/sessions`.
 
 ## Smaller items
+- Start-up hitch: resolve_all_game_addrs runs ~20 pattern scans over the whole exe on the first on_frame (~1.1 s,
+  seen in Swofty Send Logs). Move it to a background thread at load, or scan once into a cache.
 - (Done in 1.0.3) Ultrawide / triple screens: the "[F7] Instant Race" prompt is drawn at the far right of the whole display, while the game draws its menus in a centred 16:9 area (seen on 7680x1440). Anchor the prompt (and check the menu panel and loading card) to that centred 16:9 area: when width/height > 16/9, use x0 = (width - height*16/9) / 2 and w = height*16/9.
 - Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`). (HRT and Toro Rosso cases fixed in `next`.)
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.

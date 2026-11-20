@@ -436,7 +436,9 @@ constexpr TimeOfDayChoice kTimesOfDay[] = {
 constexpr int kTimesOfDayCount = int(sizeof(kTimesOfDay) / sizeof(kTimesOfDay[0]));
 const char *time_of_day_label(int i) { return kTimesOfDay[(i >= 0 && i < kTimesOfDayCount) ? i : 0].label; }
 
-constexpr const char *kWeathers[] = {"Dry", "Wet", "Dry to Wet", "Wet to Dry"};
+// "Dry to Wet" / "Wet to Dry" are parked: rebuilding the datasets after the game's build gives a white screen
+// (ROADMAP "Changing weather"). Add them back here once the custom-slot route works.
+constexpr const char *kWeathers[] = {"Dry", "Wet"};
 constexpr int kWeathersCount = int(sizeof(kWeathers) / sizeof(kWeathers[0]));
 const char *next_weather(const std::string &w) {
     for (int i = 0; i < kWeathersCount; ++i)
@@ -817,9 +819,8 @@ void reroll_track() {
 void randomize_all() {
     reroll_era();
     reroll_track();
-    std::uniform_int_distribution<int> wdist(0, 19); // 55% dry, 20% wet, 15% dry to wet, 10% wet to dry
-    int w = wdist(g_rng);
-    g_cfg.weather = w < 11 ? "Dry" : w < 15 ? "Wet" : w < 18 ? "Dry to Wet" : "Wet to Dry";
+    std::uniform_int_distribution<int> wdist(0, 3);
+    g_cfg.weather = (wdist(g_rng) == 0) ? "Wet" : "Dry";
     std::uniform_int_distribution<int> tdist(0, kTimesOfDayCount - 1);
     g_cfg.time_of_day = tdist(g_rng);
 }
