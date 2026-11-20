@@ -45,3 +45,8 @@ Option to choose where the player starts (P1 to the back), or random.
 - (Done in 1.0.3) Ultrawide / triple screens: the "[F7] Instant Race" prompt is drawn at the far right of the whole display, while the game draws its menus in a centred 16:9 area (seen on 7680x1440). Anchor the prompt (and check the menu panel and loading card) to that centred 16:9 area: when width/height > 16/9, use x0 = (width - height*16/9) / 2 and w = height*16/9.
 - Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`).
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.
+
+## Player reports to look at
+- **Tyre strategy and fuel (reported 20 Nov):** a player could not change their tyre strategy and their car was under-fuelled. Likely the race-only weekend / custom lap count not reaching the game's fuel and strategy setup. Need their instant_race.log, session folder, and the era/track/race length.
+- **Crash while loading (Racingfox2309, 1.0.3):** 2026 season, Silverstone reverse layout, Toro Rosso. Null call at F1_25.exe+0x2cf07f2, 16 s into loading, no Instant Race frame on the stack, not repeated (their 2024 Zandvoort and 2019 Hockenheim races loaded and finished). Check whether the reverse layout or the 2026 grid is involved.
+- **Team alias oddity (same player):** asking for Aston Martin at 2024 Zandvoort seated them at Force India. The Racing Point/Force India slot alias for Aston Martin is applied where the era's grid may have its own Aston Martin entry; check the alias order for 2021+ seasons.
