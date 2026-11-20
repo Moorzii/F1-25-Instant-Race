@@ -59,11 +59,15 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
 - **Fixed (fix3, tested 20 Nov 20:14):** clearing +0xdc0 when Instant Race sends StateFrontendWorld to the session
   link. Log: flag was 1 at launch, cleared; after the race StateFrontendWorld reported the session link (8c23ce89,
   flag 0) and career loaded.
-- Next (fix3b, native/src/instant_race_fix3b.cpp on the dev PC): drop the "restart the game" block on a second Instant
-  Race; the second-launch hang most likely had the same cause. Test: two Instant Races in one game session, then
-  career. If it works, both go into 1.0.4 and the README's known limitation goes.
-- The menu fade bit 0x80000000 that Instant Race clears by hand never appears in a normal Grand Prix or career start;
-  it probably comes from the same interrupt exit. 
+- fix3b (20 Nov 20:39, second-launch block removed): the first race and career were fine, but the second Instant Race
+  hung like fix2. StateFrontend went to status 3, but no fade was requested, and it never finished exiting.
+- Cause: StateFrontend::onStateInterrupt (0x1436d70a0) handles eInterruptExit (0xe, jump table at 0x14587644c) by
+  requesting the "ClosingGame" fade-out (fade mask bit 0x80000000, the bit Instant Race clears by hand) only when bit
+  0x08 of StateFrontend+0xf90 is clear, then sets that bit. Nothing clears it, so the second exit gets no fade.
+- Next (fix3c, native/src/instant_race_fix3c.cpp on the dev PC): also clear StateFrontend+0xf90 bit 0x08 at the launch
+  override and at the handover. Test: two Instant Races in one game session, then career. If it works, everything goes
+  into 1.0.4 and the README's known limitation goes.
+- The menu fade bit 0x80000000 that Instant Race clears by hand is the "ClosingGame" fade reason (see above). 
 - Swofty's own direct start (launcher 1.9.91, native/src/core/direct_start.cpp) raises the same interrupt only on
   StateFTUE as it leaves, and clears it the moment StateFTUE's onStateExit finishes, so its parents never see it.
   Instant Race raised it on the first state its hook saw (e4ef00ba, a parent) and kept it set for ~3 s until
