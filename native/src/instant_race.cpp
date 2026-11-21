@@ -623,22 +623,41 @@ std::vector<EraInfo> get_installed_eras() {
                 }
             }
             if (at) {
-                swofty::db::Value v{};
-                swofty::db::Result r = swofty::db::cell(&mode, "selectable_entrant_lists", &v);
-                if (r == swofty::db::Result::ok && v.s && *v.s) sel = v.s;
-                else {
-                    char b2[128];
-                    std::snprintf(b2, sizeof b2, "selectable_entrant_lists: %s, tag %u", swofty::db::name(r), unsigned(v.tag));
-                    why = b2;
+                // The field by cell, then by its full key (entrant_setup_mode_<row>.<field>); entrant_lists as a
+                // fallback (every season pack appends to both).
+                std::string base = "entrants.entrant_setup_modes.entrant_setup_mode_" + std::to_string(mode.index) + ".";
+                for (const char *field : {"selectable_entrant_lists", "entrant_lists"}) {
+                    swofty::db::Value v{};
+                    swofty::db::Result r = swofty::db::cell(&mode, field, &v);
+                    if (!(r == swofty::db::Result::ok && v.s && *v.s)) {
+                        swofty::db::Value v2{};
+                        swofty::db::Result r2 = swofty::db::get(base + field, &v2);
+                        char b2[160];
+                        std::snprintf(b2, sizeof b2, "%s%s: cell %s (tag %u), key %s%s %s (tag %u)", why.empty() ? "" : "; ",
+                                      field, swofty::db::name(r), unsigned(v.tag), base.c_str(), field, swofty::db::name(r2),
+                                      unsigned(v2.tag));
+                        why += b2;
+                        if (r2 == swofty::db::Result::ok && v2.s && *v2.s) { v = v2; r = r2; }
+                    }
+                    if (r == swofty::db::Result::ok && v.s && *v.s) { sel = v.s; break; }
                 }
             } else if (why.empty()) {
                 why = "no swofty_f1 row";
             }
         }
+        {
+            static bool listed = false;
+            if (!listed) {
+                listed = true;
+                std::string names;
+                for (const auto &kv : rows) names += (names.empty() ? "" : ", ") + kv.first;
+                ilog("[instant-race] [era4] entrant lists in the database (%zu): %s", rows.size(), names.c_str());
+            }
+        }
         static std::string last_why;
-        if (sel.empty() && why != last_why) {
+        if (!why.empty() && why != last_why) {
             last_why = why;
-            ilog("[instant-race] Grand Prix picker season lists not read: %s", why.c_str());
+            ilog("[instant-race] Grand Prix picker season lists %s: %s", sel.empty() ? "not read" : "read on retry", why.c_str());
         }
         if (!sel.empty()) {
             {
