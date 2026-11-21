@@ -605,12 +605,44 @@ std::vector<EraInfo> get_installed_eras() {
         // Every season pack offered on the Grand Prix picker adds its grid list to Swofty's shared setup mode
         // swofty_f1 (selectable_entrant_lists, a comma-separated field), whatever the list is called. Lists named
         // like *_tt are Time Trial-only copies; the year is the first 4-digit number in the name.
-        swofty::db::Cursor mode{};
-        if (swofty::db::row("entrants.entrant_setup_modes", "swofty_f1", &mode) == swofty::db::Result::ok) {
-            swofty::db::Value v{};
-            if (swofty::db::cell(&mode, "selectable_entrant_lists", &v) == swofty::db::Result::ok &&
-                v.tag == SWOFTY_DB_STRING && v.s) {
-                std::string all(v.s), id;
+        // Find the swofty_f1 row: by label, else by walking the table; then read the field whatever its tag.
+        std::string sel;
+        std::string why;
+        {
+            swofty::db::Cursor mode{};
+            bool at = swofty::db::row("entrants.entrant_setup_modes", "swofty_f1", &mode) == swofty::db::Result::ok;
+            if (!at) {
+                swofty::db::Cursor walk{};
+                if (swofty::db::open("entrants.entrant_setup_modes", &walk) == swofty::db::Result::ok) {
+                    do {
+                        const char *nm = swofty::db::row_name(&walk);
+                        if (nm && std::string(nm) == "swofty_f1") { mode = walk; at = true; break; }
+                    } while (swofty::db::step(&walk) == swofty::db::Result::ok);
+                } else {
+                    why = "entrants.entrant_setup_modes not readable";
+                }
+            }
+            if (at) {
+                swofty::db::Value v{};
+                swofty::db::Result r = swofty::db::cell(&mode, "selectable_entrant_lists", &v);
+                if (r == swofty::db::Result::ok && v.s && *v.s) sel = v.s;
+                else {
+                    char b2[128];
+                    std::snprintf(b2, sizeof b2, "selectable_entrant_lists: %s, tag %u", swofty::db::name(r), unsigned(v.tag));
+                    why = b2;
+                }
+            } else if (why.empty()) {
+                why = "no swofty_f1 row";
+            }
+        }
+        static std::string last_why;
+        if (sel.empty() && why != last_why) {
+            last_why = why;
+            ilog("[instant-race] Grand Prix picker season lists not read: %s", why.c_str());
+        }
+        if (!sel.empty()) {
+            {
+                std::string all(sel), id;
                 static std::string last_all;
                 if (all != last_all) {
                     last_all = all;
