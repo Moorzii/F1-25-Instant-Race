@@ -290,9 +290,6 @@ void resolve_all_game_addrs() {
         uintptr_t setup_hit = scan_pattern("E8 ?? ?? ?? ?? 48 8D 84 24 20 03 00 00 48 C7 84 24 10 03 00 00 80 00 00 00");
         g_addrs.set_setup_mode = resolve_riprel(setup_hit, 1, 5);
     }
-    if (!g_addrs.list_stat_id) {
-        g_addrs.list_stat_id = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 41 89 C6 48 8D 4C 24 50 48 8D 15"));
-    }
     if (!g_addrs.rounds_clear) {
         g_addrs.rounds_clear = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 48 8B 8E 70 02 00 00 48 8B 01 FF 90 88 00 00 00 48 85 C0 0F 84 ?? ?? ?? ?? 48 89 C3"));
     }
@@ -338,7 +335,6 @@ void resolve_all_game_addrs() {
         if (!g_addrs.mode_by_predicate) g_addrs.mode_by_predicate = base + 0x07d2280;
         if (!g_addrs.gp_predicate)      g_addrs.gp_predicate      = base + 0x077cff0;
         if (!g_addrs.set_setup_mode)    g_addrs.set_setup_mode    = base + 0x079f300;
-        if (!g_addrs.list_stat_id)      g_addrs.list_stat_id      = base + 0x24286e0;
         if (!g_addrs.rounds_clear)      g_addrs.rounds_clear      = base + 0x420cd60;
         if (!g_addrs.add_track)         g_addrs.add_track         = base + 0x0b99450;
         if (!g_addrs.build_season)      g_addrs.build_season      = base + 0x1207290;
@@ -360,7 +356,7 @@ void resolve_all_game_addrs() {
         const Named patterned[] = {
             {"flow_link", g_addrs.flow_link}, {"mode_by_predicate", g_addrs.mode_by_predicate},
             {"gp_predicate", g_addrs.gp_predicate}, {"set_setup_mode", g_addrs.set_setup_mode},
-            {"list_stat_id", g_addrs.list_stat_id}, {"rounds_clear", g_addrs.rounds_clear}, {"add_track", g_addrs.add_track},
+{"rounds_clear", g_addrs.rounds_clear}, {"add_track", g_addrs.add_track},
             {"build_season", g_addrs.build_season}, {"fill_entrants", g_addrs.fill_entrants},
             {"weekend_structure", g_addrs.weekend_structure}, {"weekend_service", g_addrs.weekend_service},
             {"rounds_component", g_addrs.rounds_component}, {"post_begin", g_addrs.post_begin}, {"post_end", g_addrs.post_end},
@@ -619,7 +615,9 @@ std::vector<EraInfo> get_installed_eras() {
                         std::string prefix = id.substr(0, f1);
                         int yr = std::atoi(id.c_str() + f1 + 4);
                         bool known = std::any_of(found.begin(), found.end(), [&](const Found &x) { return x.id == id; });
-                        if (prefix != "f1cg" && yr >= 1950 && yr <= 2100 && !known) found.push_back({yr, prefix, id});
+                        // swp_f1_<year> lists sit beside Swofty's seasons but hold current cars (seen: "Haas 26" in
+                        // swp_f1_2013), so they are not seasons of their own.
+                        if (prefix != "f1cg" && prefix != "swp" && yr >= 1950 && yr <= 2100 && !known) found.push_back({yr, prefix, id});
                     }
                 }
                 ++row_idx;
@@ -718,7 +716,7 @@ std::vector<EraInfo> get_installed_eras() {
         const std::string &id = kv.first;
         if (std::any_of(found.begin(), found.end(), [&](const Found &x) { return x.id == id; })) continue;
         bool stock = false;
-        for (const char *p : {"f1_", "f2_", "f3_", "career_", "classic", "f1cg_"})
+        for (const char *p : {"f1_", "f2_", "f3_", "career_", "classic", "f1cg_", "swp_"})
             if (id.rfind(p, 0) == 0) stock = true;
         if (stock || (id.size() > 3 && id.compare(id.size() - 3, 3, "_tt") == 0)) continue;
         int yr = 0;
