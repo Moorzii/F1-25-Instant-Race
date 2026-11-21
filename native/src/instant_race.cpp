@@ -602,6 +602,40 @@ std::vector<EraInfo> get_installed_eras() {
                 ++row_idx;
             } while (swofty::db::step(&cur) == swofty::db::Result::ok);
         }
+        // Every season pack offered on the Grand Prix picker adds its grid list to Swofty's shared setup mode
+        // swofty_f1 (selectable_entrant_lists, a comma-separated field), whatever the list is called. Lists named
+        // like *_tt are Time Trial-only copies; the year is the first 4-digit number in the name.
+        swofty::db::Cursor mode{};
+        if (swofty::db::row("entrants.entrant_setup_modes", "swofty_f1", &mode) == swofty::db::Result::ok) {
+            swofty::db::Value v{};
+            if (swofty::db::cell(&mode, "selectable_entrant_lists", &v) == swofty::db::Result::ok &&
+                v.tag == SWOFTY_DB_STRING && v.s) {
+                std::string all(v.s), id;
+                static std::string last_all;
+                if (all != last_all) {
+                    last_all = all;
+                    ilog("[instant-race] Grand Prix picker season lists (swofty_f1): %s", all.c_str());
+                }
+                for (size_t i = 0; i <= all.size(); ++i) {
+                    char c = i < all.size() ? all[i] : ',';
+                    if (c != ',' && c != ' ') { id += c; continue; }
+                    if (!id.empty() && rows.count(id) && !(id.size() > 3 && id.compare(id.size() - 3, 3, "_tt") == 0) &&
+                        id.rfind("f1cg_", 0) != 0 &&
+                        !std::any_of(found.begin(), found.end(), [&](const Found &x) { return x.id == id; })) {
+                        int yr = 0;
+                        for (size_t k = 0; k + 4 <= id.size() && !yr; ++k) {
+                            bool four = true;
+                            for (size_t j = 0; j < 4 && four; ++j) four = std::isdigit(static_cast<unsigned char>(id[k + j])) != 0;
+                            bool edge = (k == 0 || !std::isdigit(static_cast<unsigned char>(id[k - 1]))) &&
+                                        (k + 4 == id.size() || !std::isdigit(static_cast<unsigned char>(id[k + 4])));
+                            if (four && edge) yr = std::atoi(id.substr(k, 4).c_str());
+                        }
+                        if (yr >= 1950 && yr <= 2100) found.push_back({yr, id.substr(0, id.find('_')), id});
+                    }
+                    id.clear();
+                }
+            }
+        }
     }
     std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) {
         if (a.year != b.year) return a.year < b.year;
