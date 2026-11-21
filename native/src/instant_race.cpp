@@ -571,10 +571,13 @@ std::vector<EraInfo> get_installed_eras() {
         }
     }
 
-    // A season counts as installed when its Swofty grid list (sw_f1_<year>) is in the database;
-    // each Swofty season addon adds one, so new seasons (e.g. 2012, 2011) show up without a mod update.
+    // A season counts as installed when a season pack's grid list (<prefix>_f1_<year>, e.g. sw_f1_2016) is in the
+    // database; every season addon adds one, so new seasons and other season families show up without a mod update.
+    // f1cg_f1_<year> lists are only display copies of the sw_ ones (the game does not load them), so they are not
+    // seasons of their own.
     std::map<std::string, int64_t> rows;
-    std::vector<int> years;
+    struct Found { int year; std::string prefix; std::string id; };
+    std::vector<Found> found;
     if (swofty::db::available()) {
         swofty::db::Cursor cur{};
         int64_t row_idx = 0;
@@ -583,23 +586,39 @@ std::vector<EraInfo> get_installed_eras() {
                 if (const char *name = swofty::db::row_name(&cur)) {
                     std::string id(name);
                     if (!rows.count(id)) rows[id] = row_idx;
-                    if (id.size() == 10 && id.rfind("sw_f1_", 0) == 0 &&
-                        std::isdigit(static_cast<unsigned char>(id[6])) && std::isdigit(static_cast<unsigned char>(id[7])) &&
-                        std::isdigit(static_cast<unsigned char>(id[8])) && std::isdigit(static_cast<unsigned char>(id[9]))) {
-                        int yr = std::atoi(id.c_str() + 6);
-                        if (yr >= 1950 && yr <= 2100 && std::find(years.begin(), years.end(), yr) == years.end()) years.push_back(yr);
+                    size_t f1 = id.find("_f1_");
+                    bool shaped = f1 != std::string::npos && f1 > 0 && f1 <= 12 && id.size() == f1 + 8;
+                    for (size_t i = 0; shaped && i < f1; ++i)
+                        shaped = std::islower(static_cast<unsigned char>(id[i])) || std::isdigit(static_cast<unsigned char>(id[i]));
+                    for (size_t i = f1 + 4; shaped && i < id.size(); ++i)
+                        shaped = std::isdigit(static_cast<unsigned char>(id[i])) != 0;
+                    if (shaped) {
+                        std::string prefix = id.substr(0, f1);
+                        int yr = std::atoi(id.c_str() + f1 + 4);
+                        bool known = std::any_of(found.begin(), found.end(), [&](const Found &x) { return x.id == id; });
+                        if (prefix != "f1cg" && yr >= 1950 && yr <= 2100 && !known) found.push_back({yr, prefix, id});
                     }
                 }
                 ++row_idx;
             } while (swofty::db::step(&cur) == swofty::db::Result::ok);
         }
     }
-    std::sort(years.begin(), years.end());
-    for (int yr : years) {
-        std::string ys = std::to_string(yr);
-        // Prefer the f1cg list for the menu (nicer team/driver names); the build maps it to sw_f1_<year>.
-        std::string id = rows.count("f1cg_f1_" + ys) ? "f1cg_f1_" + ys : "sw_f1_" + ys;
-        out.push_back({id, ys + " Swofty", rows[id]});
+    std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) {
+        if (a.year != b.year) return a.year < b.year;
+        if ((a.prefix == "sw") != (b.prefix == "sw")) return a.prefix == "sw";
+        return a.prefix < b.prefix;
+    });
+    for (const Found &f : found) {
+        std::string ys = std::to_string(f.year);
+        if (f.prefix == "sw") {
+            // Prefer the f1cg list for the menu (nicer team/driver names); the build maps it to sw_f1_<year>.
+            std::string id = rows.count("f1cg_f1_" + ys) ? "f1cg_f1_" + ys : f.id;
+            out.push_back({id, ys + " Swofty", rows[id]});
+        } else {
+            std::string tag = f.prefix;
+            for (char &c : tag) c = char(std::toupper(static_cast<unsigned char>(c)));
+            out.push_back({f.id, ys + " (" + tag + ")", rows[f.id]});
+        }
     }
     if (rows.count("f1_2025")) out.push_back({"f1_2025", "F1 25", rows["f1_2025"]});
     if (has_2026 && rows.count("f1_2026")) out.push_back({"f1_2026", "F1 26", rows["f1_2026"]});
@@ -607,6 +626,13 @@ std::vector<EraInfo> get_installed_eras() {
     if (out.empty()) {
         out.push_back({"f1_2025", "F1 25", -1});
         if (has_2026) out.push_back({"f1_2026", "F1 26", -1});
+    }
+    static std::string last_logged;
+    std::string ids;
+    for (const EraInfo &e : out) ids += (ids.empty() ? "" : ", ") + e.id;
+    if (ids != last_logged) {
+        last_logged = ids;
+        ilog("[instant-race] Seasons found: %zu (%s)", out.size(), ids.c_str());
     }
     return out;
 }
