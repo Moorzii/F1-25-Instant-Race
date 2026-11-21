@@ -234,6 +234,20 @@ void resolve_all_game_addrs() {
     uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
     if (!base) return;
 
+    // Launcher bindings first (Addon Browser rule: use the launcher's bindings); a byte pattern is only the fallback
+    // for what the launcher does not bind on this game build. The log line at the end says which came from where.
+    std::string from_binding, from_pattern;
+    auto bind = [&](uintptr_t &slot, const char *name) {
+        if (slot || !swofty::api || !swofty::api->resolve) return;
+        slot = swofty::api->resolve(name);
+        if (slot) from_binding += std::string(from_binding.empty() ? "" : ", ") + name;
+    };
+    bind(g_addrs.game_manager, "g_Game_Manager");
+    bind(g_addrs.set_mode, "Game_Game_SetCurrentGameMode");
+    bind(g_addrs.game_root, "g_Game_Root");
+    bind(g_addrs.message_bus, "g_Game_MessageBus");
+    bind(g_addrs.despawn_main_scene, "Game_FrontendSceneManager_DespawnMainScene");
+
     // 1. Flow link check inside Vm_Update_FlowStateMachine (1.0.145 RVA: 0x4424c78 + 0x12)
     if (!g_addrs.flow_link) {
         uintptr_t fl = scan_pattern("48 8B 07 48 8D 54 24 40 48 89 F9 C5 F9 28 D6 FF 50 20 8B 44 24 40 39 05");
@@ -259,19 +273,6 @@ void resolve_all_game_addrs() {
         if (pred_hit) {
             g_addrs.gp_predicate = resolve_riprel(pred_hit, 3, 7);
             g_addrs.mode_by_predicate = resolve_riprel(pred_hit + 17, 1, 5);
-        }
-    }
-
-    // Fallback to the launcher's own bindings when a pattern misses: another addon hooking one of these functions
-    // rewrites its first bytes, which breaks the byte-pattern search (seen with a larger addon set enabled).
-    if (swofty::api && swofty::api->resolve) {
-        if (!g_addrs.game_manager) {
-            g_addrs.game_manager = swofty::api->resolve("g_Game_Manager");
-            if (g_addrs.game_manager) ilog("[instant-race] game manager from launcher binding: %p", (void *)g_addrs.game_manager);
-        }
-        if (!g_addrs.set_mode) {
-            g_addrs.set_mode = swofty::api->resolve("Game_Game_SetCurrentGameMode");
-            if (g_addrs.set_mode) ilog("[instant-race] set_mode from launcher binding: %p", (void *)g_addrs.set_mode);
         }
     }
 
@@ -352,6 +353,28 @@ void resolve_all_game_addrs() {
         if (!g_addrs.vt_msg_end)        g_addrs.vt_msg_end        = base + 0x578d510;
         if (!g_addrs.game_root)         g_addrs.game_root         = base + 0x601db08;
         if (!g_addrs.despawn_main_scene)g_addrs.despawn_main_scene= base + 0x28d9a90;
+    }
+
+    {
+        struct Named { const char *name; uintptr_t v; };
+        const Named patterned[] = {
+            {"flow_link", g_addrs.flow_link}, {"mode_by_predicate", g_addrs.mode_by_predicate},
+            {"gp_predicate", g_addrs.gp_predicate}, {"set_setup_mode", g_addrs.set_setup_mode},
+            {"list_stat_id", g_addrs.list_stat_id}, {"rounds_clear", g_addrs.rounds_clear}, {"add_track", g_addrs.add_track},
+            {"build_season", g_addrs.build_season}, {"fill_entrants", g_addrs.fill_entrants},
+            {"weekend_structure", g_addrs.weekend_structure}, {"weekend_service", g_addrs.weekend_service},
+            {"rounds_component", g_addrs.rounds_component}, {"post_begin", g_addrs.post_begin}, {"post_end", g_addrs.post_end},
+            {"vt_msg_begin", g_addrs.vt_msg_begin}, {"vt_msg_end", g_addrs.vt_msg_end}};
+        for (const Named &n : patterned)
+            if (n.v) from_pattern += std::string(from_pattern.empty() ? "" : ", ") + n.name;
+        if (from_binding.find("DespawnMainScene") == std::string::npos && g_addrs.despawn_main_scene)
+            from_pattern += ", despawn_main_scene";
+        static bool said = false;
+        if (!said) {
+            said = true;
+            ilog("[instant-race] From launcher bindings: %s", from_binding.empty() ? "none" : from_binding.c_str());
+            ilog("[instant-race] From byte patterns (no launcher binding on this build): %s", from_pattern.c_str());
+        }
     }
 
     if (g_addrs.flow_link && g_addrs.game_manager && g_addrs.set_mode && g_addrs.mode_by_predicate && g_addrs.gp_predicate) {
@@ -1300,6 +1323,7 @@ bool complete_load_sync(uint8_t *state) {
     uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
     if (!base) return false;
     static uintptr_t fn_set_bool = 0;
+    if (!fn_set_bool && swofty::api && swofty::api->resolve) fn_set_bool = swofty::api->resolve("Vm_NodeSet_Bool");
     if (!fn_set_bool) {
         fn_set_bool = scan_pattern("41 56 56 57 55 53 48 81 EC 20 03 00 00 F6 41 26 01 0F 85 ?? ?? ?? ?? 44 89 CB 44 89 C7 49 89 D6 48 89 CE 48 8B 49 58 48 8B 01 FF 50 38 84 DB 75 0E 0F B6 08");
         if (!fn_set_bool) {
@@ -1421,18 +1445,15 @@ void init_ui_route_hooks() {
     uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
     if (!base) return;
 
-    a_make_nestr = scan_pattern("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20 48 8B 39 45 8B F9 41 8B E8 48 8B F2 48 85 FF");
-    if (!a_make_nestr && swofty::api->resolve) {
-        a_make_nestr = swofty::api->resolve("Ne_Make_StrFromCStr");
-    }
+    if (swofty::api->resolve) a_make_nestr = swofty::api->resolve("Ne_Make_StrFromCStr");
+    if (!a_make_nestr)
+        a_make_nestr = scan_pattern("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20 48 8B 39 45 8B F9 41 8B E8 48 8B F2 48 85 FF");
 
-    uintptr_t fire_site = scan_pattern("48 8B 4E 28 48 89 F2 49 89 F8 45 31 C9 E8 ?? ?? ?? ?? E9 E4 00 00 00");
+    if (swofty::api->resolve) a_fire_route = swofty::api->resolve("Vm_Fire_Route");
+    uintptr_t fire_site = a_fire_route ? 0 : scan_pattern("48 8B 4E 28 48 89 F2 49 89 F8 45 31 C9 E8 ?? ?? ?? ?? E9 E4 00 00 00");
     if (fire_site && swofty::mem::readable(reinterpret_cast<void *>(fire_site + 13), 5)) {
         int32_t rel = *reinterpret_cast<int32_t *>(fire_site + 14);
         a_fire_route = fire_site + 18 + rel;
-    }
-    if (!a_fire_route && swofty::api->resolve) {
-        a_fire_route = swofty::api->resolve("Vm_Fire_Route");
     }
     if (!a_fire_route) {
         a_fire_route = base + 0x42c0e20;
