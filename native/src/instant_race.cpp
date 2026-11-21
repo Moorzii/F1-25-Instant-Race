@@ -688,6 +688,28 @@ std::vector<EraInfo> get_installed_eras() {
             }
         }
     }
+    // Catch-all: any other grid list with a year in its name that is not one of the game's own lists (those start
+    // with f1_, f2_, f3_, career_ or classic) is an addon season too, whatever its author calls it. Time Trial copies
+    // (*_tt) and the f1cg display copies are skipped.
+    for (const auto &kv : rows) {
+        const std::string &id = kv.first;
+        if (std::any_of(found.begin(), found.end(), [&](const Found &x) { return x.id == id; })) continue;
+        bool stock = false;
+        for (const char *p : {"f1_", "f2_", "f3_", "career_", "classic", "f1cg_"})
+            if (id.rfind(p, 0) == 0) stock = true;
+        if (stock || (id.size() > 3 && id.compare(id.size() - 3, 3, "_tt") == 0)) continue;
+        int yr = 0;
+        for (size_t k = 0; k + 4 <= id.size() && !yr; ++k) {
+            bool four = true;
+            for (size_t j = 0; j < 4 && four; ++j) four = std::isdigit(static_cast<unsigned char>(id[k + j])) != 0;
+            bool edge = (k == 0 || !std::isdigit(static_cast<unsigned char>(id[k - 1]))) &&
+                        (k + 4 == id.size() || !std::isdigit(static_cast<unsigned char>(id[k + 4])));
+            if (four && edge) yr = std::atoi(id.substr(k, 4).c_str());
+        }
+        std::string prefix = id.substr(0, id.find('_'));
+        bool same = std::any_of(found.begin(), found.end(), [&](const Found &x) { return x.year == yr && x.prefix == prefix; });
+        if (yr >= 1950 && yr <= 2100 && !same) found.push_back({yr, prefix, id});
+    }
     std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) {
         if (a.year != b.year) return a.year < b.year;
         if ((a.prefix == "sw") != (b.prefix == "sw")) return a.prefix == "sw";
