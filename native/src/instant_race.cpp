@@ -119,7 +119,6 @@ struct GameAddrs {
     uintptr_t mode_by_predicate = 0;
     uintptr_t gp_predicate = 0;
     uintptr_t set_setup_mode = 0;
-    uintptr_t list_stat_id = 0;
     uintptr_t rounds_clear = 0;
     uintptr_t add_track = 0;
     uintptr_t build_season = 0;
@@ -136,259 +135,70 @@ struct GameAddrs {
     uintptr_t despawn_main_scene = 0;
 } g_addrs;
 
-// --- Fast PE Image Pattern Scanner ---
-uintptr_t scan_pattern(const char *pattern) {
-    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
-    if (!base) return 0;
-    auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-    auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+// --- Game addresses -----------------------------------------------------------------------------------------------
+// Every game address comes from a Swofty Launcher binding (Addon Browser rule: addons use the launcher's bindings,
+// no own byte patterns, fixed addresses or code patches). The bindings were added to the launcher for Instant Race
+// (SwoftyLauncher PRs #1467, #1514, #1515); an older launcher lacks some of them and Instant Race then stays off.
+struct BindingSlot {
+    uintptr_t *slot;
+    const char *name;
+};
 
-    std::vector<int> bytes;
-    std::istringstream iss(pattern);
-    std::string tok;
-    while (iss >> tok) {
-        if (tok == "?" || tok == "??") bytes.push_back(-1);
-        else bytes.push_back(static_cast<int>(std::strtol(tok.c_str(), nullptr, 16)));
-    }
-    if (bytes.empty()) return 0;
+std::string g_missing_bindings;
 
-    const auto *sec = IMAGE_FIRST_SECTION(nt);
-    for (unsigned s = 0; s < nt->FileHeader.NumberOfSections; ++s) {
-        if ((sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
-        const uint8_t *start = reinterpret_cast<const uint8_t *>(base + sec[s].VirtualAddress);
-        size_t size = sec[s].Misc.VirtualSize;
-        if (size < bytes.size()) continue;
-        size_t limit = size - bytes.size();
-        for (size_t i = 0; i <= limit; ++i) {
-            bool ok = true;
-            for (size_t j = 0; j < bytes.size(); ++j) {
-                if (bytes[j] != -1 && start[i + j] != static_cast<uint8_t>(bytes[j])) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) return reinterpret_cast<uintptr_t>(start + i);
-        }
-    }
-    return 0;
-}
-
-uintptr_t resolve_riprel(uintptr_t hit, size_t disp_off, size_t instr_len) {
-    if (!hit) return 0;
-    int32_t disp = *reinterpret_cast<const int32_t *>(hit + disp_off);
-    return hit + instr_len + disp;
-}
-
-// The target of an E8 call at the start of a match: several of the game's functions are found from a call to them.
-uintptr_t resolve_rel32_call(uintptr_t hit) {
-    return resolve_riprel(hit, 1, 5);
-}
-
-// Diagnostic: logs what is really in memory for the functions the signatures could not find, so their addresses on
-// this exact build can be worked out from the log. Runs once per game start (and again at launch, since some code is
-// only decrypted later).
-void diag_find_functions(const char *when) {
-    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
-    if (!base) return;
-    struct Item { const char *name; uintptr_t old_rva; const char *frag; };
-    static const Item items[] = {
-        {"rounds_clear", 0x420cd60, "48 8B 32 48 8B FA 48 8B 4A 08"},
-        {"add_track",    0x0b99450, "48 8B 89 A8 02 00 00"},
-        {"build_season", 0x1207290, "48 8B B9 90 02 00 00"},
-        {"fill_entrants",0x2460230, "45 89 CF 4D 89 C6"},
-        {"list_stat_id", 0x24286e0, "48 85 C9 74 ?? 80 39 00"},
-    };
-    for (const auto &it : items) {
-        uintptr_t at = base + it.old_rva;
-        for (uintptr_t d : {uintptr_t(0), uintptr_t(0x40)}) {
-            const uint8_t *p = reinterpret_cast<const uint8_t *>(at + d);
-            if (!swofty::mem::readable(p, 24)) { ilog("[instant-race] diag(%s) %s +0x%llx: unreadable", when, it.name, (unsigned long long)d); continue; }
-            char hex[24 * 3 + 1]{};
-            for (int i = 0; i < 24; ++i) std::snprintf(hex + i * 3, 4, "%02X ", p[i]);
-            ilog("[instant-race] diag(%s) %s old+0x%llx rva=0x%llx bytes: %s", when, it.name, (unsigned long long)d, (unsigned long long)(it.old_rva + d), hex);
-        }
-        std::vector<int> bytes;
-        std::istringstream iss(it.frag);
-        std::string tok;
-        while (iss >> tok) bytes.push_back(tok == "??" ? -1 : static_cast<int>(std::strtol(tok.c_str(), nullptr, 16)));
-        uintptr_t lo = it.old_rva > 0x40000 ? it.old_rva - 0x40000 : 0, hi = it.old_rva + 0x40000;
-        int hits = 0;
-        for (uintptr_t page = lo & ~uintptr_t(0xfff); page < hi && hits < 6; page += 0x1000) {
-            if (!swofty::mem::readable(reinterpret_cast<const void *>(base + page), 0x1000 + 32)) continue;
-            const uint8_t *s = reinterpret_cast<const uint8_t *>(base + page);
-            for (size_t i = 0; i < 0x1000 && hits < 6; ++i) {
-                bool ok = true;
-                for (size_t j = 0; j < bytes.size(); ++j)
-                    if (bytes[j] != -1 && s[i + j] != static_cast<uint8_t>(bytes[j])) { ok = false; break; }
-                if (ok) { ilog("[instant-race] diag(%s) %s fragment at rva=0x%llx (old rva 0x%llx)", when, it.name, (unsigned long long)(page + i), (unsigned long long)it.old_rva); ++hits; }
-            }
-        }
-        if (!hits) ilog("[instant-race] diag(%s) %s fragment: no hit within +-0x40000 of old rva", when, it.name);
-    }
+uintptr_t bind_name(const char *name) {
+    return (swofty::api && swofty::api->resolve) ? swofty::api->resolve(name) : 0;
 }
 
 void resolve_all_game_addrs() {
     if (g_addrs.scanned) return;
-    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
-    if (!base) return;
+    if (!swofty::api || !swofty::api->resolve || !swofty::api->module_base()) return;
 
-    // Launcher bindings first (Addon Browser rule: use the launcher's bindings); a byte pattern is only the fallback
-    // for what the launcher does not bind on this game build. The log line at the end says which came from where.
-    std::string from_binding, from_pattern;
-    auto bind = [&](uintptr_t &slot, const char *name) {
-        if (slot || !swofty::api || !swofty::api->resolve) return;
-        slot = swofty::api->resolve(name);
-        if (slot) from_binding += std::string(from_binding.empty() ? "" : ", ") + name;
+    const BindingSlot slots[] = {
+        {&g_addrs.flow_link, "site_FeFlow_AfterStateLink"},
+        {&g_addrs.game_manager, "g_Game_Manager"},
+        {&g_addrs.set_mode, "Game_Game_SetCurrentGameMode"},
+        {&g_addrs.mode_by_predicate, "Game_GameModes_FindByPredicate"},
+        {&g_addrs.gp_predicate, "Game_GameMode_IsGrandPrix"},
+        {&g_addrs.set_setup_mode, "Game_GameModeEntity_SetSetupMode"},
+        {&g_addrs.rounds_clear, "Vm_Node_Clear"},
+        {&g_addrs.add_track, "Game_ChampionshipRounds_AddTrack_Thunk"},
+        {&g_addrs.build_season, "Game_CustomSeason_RebuildFromRounds"},
+        {&g_addrs.fill_entrants, "Ent_Fill_EntrantsFromList"},
+        {&g_addrs.weekend_structure, "Sess_Build_DevWeekendStructure"},
+        {&g_addrs.weekend_service, "k_Sess_WeekendSetupComponentDesc"},
+        {&g_addrs.rounds_component, "k_Game_CustomTrackListComponentDesc"},
+        {&g_addrs.message_bus, "g_Game_MessageBus"},
+        {&g_addrs.post_begin, "Game_MessageBus_PostEntrantChangeBegin"},
+        {&g_addrs.post_end, "Game_MessageBus_PostEntrantChangeEnd"},
+        {&g_addrs.vt_msg_begin, "vt_Game_EntrantsDocumentOpenedMsg"},
+        {&g_addrs.vt_msg_end, "vt_Game_EntrantsDocumentClosedMsg"},
+        {&g_addrs.game_root, "g_Game_Root"},
+        {&g_addrs.despawn_main_scene, "Game_FrontendSceneManager_DespawnMainScene"},
     };
-    bind(g_addrs.game_manager, "g_Game_Manager");
-    bind(g_addrs.set_mode, "Game_Game_SetCurrentGameMode");
-    bind(g_addrs.game_root, "g_Game_Root");
-    bind(g_addrs.message_bus, "g_Game_MessageBus");
-    bind(g_addrs.despawn_main_scene, "Game_FrontendSceneManager_DespawnMainScene");
-
-    // 1. Flow link check inside Vm_Update_FlowStateMachine (1.0.145 RVA: 0x4424c78 + 0x12)
-    if (!g_addrs.flow_link) {
-        uintptr_t fl = scan_pattern("48 8B 07 48 8D 54 24 40 48 89 F9 C5 F9 28 D6 FF 50 20 8B 44 24 40 39 05");
-        if (!fl && swofty::mem::readable(reinterpret_cast<void *>(base + 0x4424c78), 24)) {
-            const auto *p = reinterpret_cast<const uint8_t *>(base + 0x4424c78);
-            if (p[0] == 0x48 && p[1] == 0x8B && p[2] == 0x07 && p[0x12] == 0x8B && p[0x13] == 0x44) {
-                fl = base + 0x4424c78;
-            }
-        }
-        if (fl) g_addrs.flow_link = fl + 0x12;
+    std::string missing;
+    for (const BindingSlot &b : slots) {
+        if (!*b.slot) *b.slot = bind_name(b.name);
+        if (!*b.slot) missing += std::string(missing.empty() ? "" : ", ") + b.name;
     }
-
-    // 2. Game Manager & Mode lookup functions
-    if (!g_addrs.game_manager) {
-        uintptr_t gm_hit = scan_pattern("48 8B B8 98 01 00 00 48 85 FF 0F 84 ?? ?? ?? ?? 48 8D 4C 24 70 E8 ?? ?? ?? ?? 48 8B 05");
-        g_addrs.game_manager = resolve_riprel(gm_hit, 29, 33);
-    }
-    if (!g_addrs.set_mode) {
-        g_addrs.set_mode = scan_pattern("41 56 56 57 55 53 48 81 EC 80 00 00 00 48 8B 81 88 00 00 00");
-    }
-    if (!g_addrs.gp_predicate || !g_addrs.mode_by_predicate) {
-        uintptr_t pred_hit = scan_pattern("48 8D 05 ?? ?? ?? ?? 48 89 44 24 28 48 8D 54 24 28 E8 ?? ?? ?? ?? 48 85 C0 74 22");
-        if (pred_hit) {
-            g_addrs.gp_predicate = resolve_riprel(pred_hit, 3, 7);
-            g_addrs.mode_by_predicate = resolve_riprel(pred_hit + 17, 1, 5);
-        }
-    }
-
-    // 3. Game Root & Scene Despawn
-    if (!g_addrs.game_root) {
-        uintptr_t root_hit = scan_pattern("48 8B 05 ?? ?? ?? ?? 48 8B 40 60 48 8B 88 D0 09 00 00 FF 15 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 40 60");
-        g_addrs.game_root = resolve_riprel(root_hit, 3, 7);
-    }
-    if (!g_addrs.despawn_main_scene) {
-        g_addrs.despawn_main_scene = scan_pattern("56 57 53 48 83 EC 20 48 89 CE 80 3D ?? ?? ?? ?? 01 75 66 B8 BD 00 00 00");
-    }
-
-    // 4. Grand Prix Weekend Setup Functions
-    if (!g_addrs.set_setup_mode) {
-        uintptr_t setup_hit = scan_pattern("E8 ?? ?? ?? ?? 48 8D 84 24 20 03 00 00 48 C7 84 24 10 03 00 00 80 00 00 00");
-        g_addrs.set_setup_mode = resolve_riprel(setup_hit, 1, 5);
-    }
-    if (!g_addrs.rounds_clear) {
-        g_addrs.rounds_clear = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 48 8B 8E 70 02 00 00 48 8B 01 FF 90 88 00 00 00 48 85 C0 0F 84 ?? ?? ?? ?? 48 89 C3"));
-    }
-    if (!g_addrs.add_track) {
-        g_addrs.add_track = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? 48 83 C6 08 48 39 DE 75 EC 48 8B BC 24 70 01 00 00"));
-    }
-    if (!g_addrs.build_season) {
-        g_addrs.build_season = scan_pattern("56 48 83 EC 20 48 89 CE BA 98 02 00 00");
-    }
-    if (!g_addrs.fill_entrants) {
-        g_addrs.fill_entrants = scan_pattern("41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC B8 00 00 00 4D 89 CE 4C 89 C7");
-    }
-    if (!g_addrs.weekend_structure) {
-        g_addrs.weekend_structure = scan_pattern("41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 48 44 89 CD 45 89 C6");
-    }
-    if (!g_addrs.weekend_service) {
-        g_addrs.weekend_service = resolve_riprel(scan_pattern("48 8D 15 ?? ?? ?? ?? 41 B8 01 00 00 00 FF 50 10 48 85 C0 74 4B"), 3, 7);
-    }
-    if (!g_addrs.rounds_component) {
-        g_addrs.rounds_component = resolve_riprel(scan_pattern("48 8D 15 ?? ?? ?? ?? FF 50 10 48 89 83 50 05 00 00"), 3, 7);
-    }
-    if (!g_addrs.message_bus) {
-        g_addrs.message_bus = resolve_riprel(scan_pattern("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 30 48 8B 48 08"), 3, 7);
-    }
-    if (!g_addrs.post_begin) {
-        g_addrs.post_begin = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? C6 86 F8 02 00 00 01 4C 89 F1"));
-    }
-    if (!g_addrs.post_end) {
-        g_addrs.post_end = resolve_rel32_call(scan_pattern("E8 ?? ?? ?? ?? C6 86 F8 02 00 00 00 85 FF"));
-    }
-    if (!g_addrs.vt_msg_begin) {
-        g_addrs.vt_msg_begin = resolve_riprel(scan_pattern("4C 8D 25 ?? ?? ?? ?? 4C 89 64 24 50 48 8B 48 08"), 3, 7);
-    }
-    if (!g_addrs.vt_msg_end) {
-        g_addrs.vt_msg_end = resolve_riprel(scan_pattern("48 8D 0D ?? ?? ?? ?? 48 89 4C 24 38 4C 89 74 24 48"), 3, 7);
-    }
-
-    // Fallback to 1.0.145.2472 RVAs when flow_link matches base + 0x4424c78 + 0x12
-    bool is_145 = (g_addrs.flow_link == base + 0x4424c78 + 0x12);
-    if (is_145) {
-        if (!g_addrs.game_manager)      g_addrs.game_manager      = base + 0x604c2c8;
-        if (!g_addrs.set_mode)          g_addrs.set_mode          = base + 0x07d07a0;
-        if (!g_addrs.mode_by_predicate) g_addrs.mode_by_predicate = base + 0x07d2280;
-        if (!g_addrs.gp_predicate)      g_addrs.gp_predicate      = base + 0x077cff0;
-        if (!g_addrs.set_setup_mode)    g_addrs.set_setup_mode    = base + 0x079f300;
-        if (!g_addrs.rounds_clear)      g_addrs.rounds_clear      = base + 0x420cd60;
-        if (!g_addrs.add_track)         g_addrs.add_track         = base + 0x0b99450;
-        if (!g_addrs.build_season)      g_addrs.build_season      = base + 0x1207290;
-        if (!g_addrs.fill_entrants)     g_addrs.fill_entrants     = base + 0x2460230;
-        if (!g_addrs.weekend_structure) g_addrs.weekend_structure = base + 0x0b025f0;
-        if (!g_addrs.weekend_service)   g_addrs.weekend_service   = base + 0x605ada0;
-        if (!g_addrs.rounds_component)  g_addrs.rounds_component  = base + 0x605ad40;
-        if (!g_addrs.message_bus)       g_addrs.message_bus       = base + 0x618b3b8;
-        if (!g_addrs.post_begin)        g_addrs.post_begin        = base + 0x24e2b90;
-        if (!g_addrs.post_end)          g_addrs.post_end          = base + 0x24e2f00;
-        if (!g_addrs.vt_msg_begin)      g_addrs.vt_msg_begin      = base + 0x578d4e8;
-        if (!g_addrs.vt_msg_end)        g_addrs.vt_msg_end        = base + 0x578d510;
-        if (!g_addrs.game_root)         g_addrs.game_root         = base + 0x601db08;
-        if (!g_addrs.despawn_main_scene)g_addrs.despawn_main_scene= base + 0x28d9a90;
-    }
-
-    {
-        struct Named { const char *name; uintptr_t v; };
-        const Named patterned[] = {
-            {"flow_link", g_addrs.flow_link}, {"mode_by_predicate", g_addrs.mode_by_predicate},
-            {"gp_predicate", g_addrs.gp_predicate}, {"set_setup_mode", g_addrs.set_setup_mode},
-{"rounds_clear", g_addrs.rounds_clear}, {"add_track", g_addrs.add_track},
-            {"build_season", g_addrs.build_season}, {"fill_entrants", g_addrs.fill_entrants},
-            {"weekend_structure", g_addrs.weekend_structure}, {"weekend_service", g_addrs.weekend_service},
-            {"rounds_component", g_addrs.rounds_component}, {"post_begin", g_addrs.post_begin}, {"post_end", g_addrs.post_end},
-            {"vt_msg_begin", g_addrs.vt_msg_begin}, {"vt_msg_end", g_addrs.vt_msg_end}};
-        for (const Named &n : patterned)
-            if (n.v) from_pattern += std::string(from_pattern.empty() ? "" : ", ") + n.name;
-        if (from_binding.find("DespawnMainScene") == std::string::npos && g_addrs.despawn_main_scene)
-            from_pattern += ", despawn_main_scene";
-        static bool said = false;
-        if (!said) {
-            said = true;
-            ilog("[instant-race] From launcher bindings: %s", from_binding.empty() ? "none" : from_binding.c_str());
-            ilog("[instant-race] From byte patterns (no launcher binding on this build): %s", from_pattern.c_str());
-        }
-    }
-
-    if (g_addrs.flow_link && g_addrs.game_manager && g_addrs.set_mode && g_addrs.mode_by_predicate && g_addrs.gp_predicate) {
+    g_missing_bindings = missing;
+    if (missing.empty()) {
         g_addrs.scanned = true;
-        ilog("[instant-race] Sig scan OK (is_145=%d): flow=%p mgr=%p set_mode=%p pred=%p setup=%p rounds_clr=%p add_trk=%p bld_ssn=%p fill=%p",
-             is_145 ? 1 : 0, (void *)g_addrs.flow_link, (void *)g_addrs.game_manager,
-             (void *)g_addrs.set_mode, (void *)g_addrs.gp_predicate, (void *)g_addrs.set_setup_mode,
-             (void *)g_addrs.rounds_clear, (void *)g_addrs.add_track,
+        ilog("[instant-race] All %zu game addresses come from launcher bindings", sizeof(slots) / sizeof(slots[0]));
+        ilog("[instant-race] flow=%p mgr=%p set_mode=%p pred=%p setup=%p rounds_clr=%p add_trk=%p bld_ssn=%p fill=%p",
+             (void *)g_addrs.flow_link, (void *)g_addrs.game_manager, (void *)g_addrs.set_mode, (void *)g_addrs.gp_predicate,
+             (void *)g_addrs.set_setup_mode, (void *)g_addrs.rounds_clear, (void *)g_addrs.add_track,
              (void *)g_addrs.build_season, (void *)g_addrs.fill_entrants);
         ilog("[instant-race] more: wk_struct=%p wk_service=%p rounds_comp=%p msg_bus=%p post_begin=%p post_end=%p vt_begin=%p vt_end=%p game_root=%p despawn=%p",
              (void *)g_addrs.weekend_structure, (void *)g_addrs.weekend_service, (void *)g_addrs.rounds_component,
              (void *)g_addrs.message_bus, (void *)g_addrs.post_begin, (void *)g_addrs.post_end,
              (void *)g_addrs.vt_msg_begin, (void *)g_addrs.vt_msg_end, (void *)g_addrs.game_root,
              (void *)g_addrs.despawn_main_scene);
-        static bool diag_boot = false;
-        if (!diag_boot && !(g_addrs.rounds_clear && g_addrs.add_track && g_addrs.build_season && g_addrs.fill_entrants)) {
-            diag_boot = true;
-            diag_find_functions("boot");
+    } else {
+        static std::string said;
+        if (said != missing) {
+            said = missing;
+            ilog("[instant-race] This Swofty Launcher does not provide: %s. Update the launcher to use Instant Race.", missing.c_str());
         }
     }
 }
@@ -1369,13 +1179,10 @@ bool complete_load_sync(uint8_t *state) {
     uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
     if (!base) return false;
     static uintptr_t fn_set_bool = 0;
-    if (!fn_set_bool && swofty::api && swofty::api->resolve) fn_set_bool = swofty::api->resolve("Vm_NodeSet_Bool");
+    if (!fn_set_bool) fn_set_bool = bind_name("Vm_NodeSet_Bool");
     if (!fn_set_bool) {
-        fn_set_bool = scan_pattern("41 56 56 57 55 53 48 81 EC 20 03 00 00 F6 41 26 01 0F 85 ?? ?? ?? ?? 44 89 CB 44 89 C7 49 89 D6 48 89 CE 48 8B 49 58 48 8B 01 FF 50 38 84 DB 75 0E 0F B6 08");
-        if (!fn_set_bool) {
-            ilog("[instant-race] node_set_bool signature not found; cannot complete the load sync");
-            return false;
-        }
+        ilog("[instant-race] Vm_NodeSet_Bool binding not available; cannot complete the load sync");
+        return false;
     }
     uint8_t *sync = state + LOAD_SYNC;
     if (!swofty::mem::readable(sync, 0xb0)) return false;
@@ -1488,83 +1295,11 @@ uint64_t container_cmd_detour(void *container, NeStr **message, void *third) {
 void init_ui_route_hooks() {
     static std::atomic<bool> done{false};
     if (done.exchange(true)) return;
-    uintptr_t base = swofty::api ? swofty::api->module_base() : 0;
-    if (!base) return;
-
-    if (swofty::api->resolve) a_make_nestr = swofty::api->resolve("Ne_Make_StrFromCStr");
-    if (!a_make_nestr)
-        a_make_nestr = scan_pattern("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20 48 8B 39 45 8B F9 41 8B E8 48 8B F2 48 85 FF");
-
-    if (swofty::api->resolve) a_fire_route = swofty::api->resolve("Vm_Fire_Route");
-    uintptr_t fire_site = a_fire_route ? 0 : scan_pattern("48 8B 4E 28 48 89 F2 49 89 F8 45 31 C9 E8 ?? ?? ?? ?? E9 E4 00 00 00");
-    if (fire_site && swofty::mem::readable(reinterpret_cast<void *>(fire_site + 13), 5)) {
-        int32_t rel = *reinterpret_cast<int32_t *>(fire_site + 14);
-        a_fire_route = fire_site + 18 + rel;
-    }
-    if (!a_fire_route) {
-        a_fire_route = base + 0x42c0e20;
-    }
-
-    a_container_cmd = scan_pattern("41 57 41 56 41 55 41 54 56 57 53 48 81 EC B0 00 00 00 48 8B 02 48 85 C0 0F 84 ?? ?? ?? ?? 4C 89 C7 49 89 D0 48 89 CE 8B 00 3D 37 3B FC FC 0F 8E ?? ?? ?? ?? 3D BD FC E1 41");
-    if (!a_container_cmd) a_container_cmd = base + 0x1a77d60;
-
-    uint8_t *mid = reinterpret_cast<uint8_t *>(a_container_cmd + 30);
-    if (mid && swofty::mem::readable(mid, 16) &&
-        mid[0] == 0x4C && mid[1] == 0x89 && mid[2] == 0xC7 && mid[3] == 0x49 && mid[4] == 0x89 && mid[5] == 0xD0) {
-        uint8_t *stub = static_cast<uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-        if (stub) {
-            static auto on_container_args = +[](void *vm, void *third) {
-                if (vm) {
-                    if (g_container_vm.exchange(vm) != vm) {
-                        g_container_at.store(GetTickCount64());
-                        g_solo_gp_sent.store(false);
-                        swofty::log("[instant-race] Captured activity container VM %p (third=%p) at HandleCommand+30!", vm, third);
-                    }
-                    if (third) g_container_third.store(third);
-                }
-            };
-            size_t p = 0;
-            stub[p++] = 0x50; // push rax (original code needs it)
-            stub[p++] = 0x51; stub[p++] = 0x52;
-            stub[p++] = 0x41; stub[p++] = 0x50;
-            stub[p++] = 0x41; stub[p++] = 0x51;
-            stub[p++] = 0x41; stub[p++] = 0x52;
-            stub[p++] = 0x41; stub[p++] = 0x53;
-            stub[p++] = 0x55;                                             // push rbp
-            stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xE5;         // mov rbp, rsp
-            stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xE4; stub[p++] = 0xF0; // and rsp, -16
-            stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xEC; stub[p++] = 0x20; // sub rsp, 0x20
-            stub[p++] = 0x4C; stub[p++] = 0x89; stub[p++] = 0xC2;
-            stub[p++] = 0x48; stub[p++] = 0xB8;
-            uint64_t cb_addr = reinterpret_cast<uint64_t>(on_container_args);
-            std::memcpy(stub + p, &cb_addr, 8); p += 8;
-            stub[p++] = 0xFF; stub[p++] = 0xD0;
-            stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xEC;         // mov rsp, rbp
-            stub[p++] = 0x5D;                                             // pop rbp
-            stub[p++] = 0x41; stub[p++] = 0x5B;
-            stub[p++] = 0x41; stub[p++] = 0x5A;
-            stub[p++] = 0x41; stub[p++] = 0x59;
-            stub[p++] = 0x41; stub[p++] = 0x58;
-            stub[p++] = 0x5A; stub[p++] = 0x59;
-            stub[p++] = 0x58; // pop rax
-            std::memcpy(stub + p, mid, 16); p += 16;
-            stub[p++] = 0xFF; stub[p++] = 0x25;
-            *reinterpret_cast<uint32_t *>(stub + p) = 0; p += 4;
-            uint64_t back_addr = reinterpret_cast<uint64_t>(mid + 16);
-            std::memcpy(stub + p, &back_addr, 8); p += 8;
-
-            DWORD oldp = 0;
-            if (VirtualProtect(mid, 16, PAGE_EXECUTE_READWRITE, &oldp)) {
-                mid[0] = 0xFF; mid[1] = 0x25;
-                *reinterpret_cast<uint32_t *>(mid + 2) = 0;
-                *reinterpret_cast<uint64_t *>(mid + 6) = reinterpret_cast<uint64_t>(stub);
-                mid[14] = 0x90; mid[15] = 0x90;
-                VirtualProtect(mid, 16, oldp, &oldp);
-                FlushInstructionCache(GetCurrentProcess(), mid, 16);
-                swofty::log("[instant-race] Hooked HandleCommand+30 at %p -> stub %p", mid, stub);
-            }
-        }
-    }
+    a_make_nestr = bind_name("Ne_Make_StrFromCStr");
+    a_fire_route = bind_name("Vm_Fire_Route");
+    a_container_cmd = bind_name("Game_F1WorldActivityContainer_HandleCommand");
+    ilog("[instant-race] UI route bindings: make_str=%p fire_route=%p container_cmd=%p",
+         (void *)a_make_nestr, (void *)a_fire_route, (void *)a_container_cmd);
 }
 
 bool fire_ui_route(const char *group, const char *route) {
@@ -1739,124 +1474,15 @@ extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link)
     return link;
 }
 
-bool install_flow_hook() {
-    if (g_flow_hook_installed) return true;
-    resolve_all_game_addrs();
-    if (!g_addrs.flow_link) { swofty::log("[instant-race] flow hook: flow_link address not resolved"); return false; }
-
-    uint8_t *target = reinterpret_cast<uint8_t *>(g_addrs.flow_link);
-    if (!swofty::mem::readable(target, 16)) { swofty::log("[instant-race] flow hook: target %p not readable", target); return false; }
-
-    if (target[0] != 0x8B || target[1] != 0x44 || target[2] != 0x24 || target[3] != 0x40 ||
-        target[4] != 0x39 || target[5] != 0x05) {
-        swofty::log("[instant-race] Unexpected bytes at flow_link (%02X %02X %02X %02X %02X %02X)",
-                    target[0], target[1], target[2], target[3], target[4], target[5]);
-        return false;
-    }
-
-    int32_t orig_disp = *reinterpret_cast<int32_t *>(target + 6);
-    uintptr_t rip_after = reinterpret_cast<uintptr_t>(target + 10);
-    uintptr_t g_stay_addr = rip_after + orig_disp;
-
-    // The stub can live anywhere (absolute addressing only). The 5-byte jump at the target needs a landing spot
-    // within rel32 reach, so we use a run of int3 padding (0xCC) between functions in the game's own code as a
-    // 14-byte trampoline (jmp [rip+0] -> stub). This replaces the old sweep for free memory near the game, which
-    // fails when many addons have used up that address range (1.0.0 bug: "no stub memory near ...").
-    uint8_t *stub = static_cast<uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-    if (!stub) { swofty::log("[instant-race] flow hook: VirtualAlloc for the stub failed"); return false; }
-
-    uint8_t *cave = nullptr;
-    {
-        constexpr size_t kNeed = 16;
-        constexpr intptr_t kSpan = 0x4000000; // search +-64 MB around the target, well inside rel32 reach
-        uintptr_t lo = reinterpret_cast<uintptr_t>(target) > uintptr_t(kSpan) ? reinterpret_cast<uintptr_t>(target) - kSpan : 0;
-        uintptr_t hi = reinterpret_cast<uintptr_t>(target) + kSpan;
-        for (uintptr_t page = (reinterpret_cast<uintptr_t>(target) & ~uintptr_t(0xfff)), step = 0; !cave && step < 2 * (kSpan / 0x1000); ++step) {
-            // alternate forwards / backwards from the target's page
-            intptr_t k = intptr_t(step / 2 + 1) * ((step & 1) ? -1 : 1);
-            uintptr_t pg = page + k * 0x1000;
-            if (pg < lo || pg >= hi) continue;
-            MEMORY_BASIC_INFORMATION mbi{};
-            if (!VirtualQuery(reinterpret_cast<void *>(pg), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) continue;
-            if (!(mbi.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) continue;
-            auto *p = reinterpret_cast<uint8_t *>(pg);
-            size_t run = 0;
-            for (size_t o = 0; o < 0x1000; ++o) {
-                run = (p[o] == 0xCC) ? run + 1 : 0;
-                // need kNeed CCs after a ret / jmp / CC boundary, and keep 1 byte of padding untouched at the start
-                if (run == kNeed + 1 && o + 1 >= kNeed + 1) {
-                    uint8_t *start = p + o + 1 - kNeed;
-                    if (start - 2 >= p && (start[-2] == 0xC3 || start[-2] == 0xCC || start[-2] == 0xE9 || start[-2] == 0xEB)) {
-                        cave = start;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (!cave) { swofty::log("[instant-race] flow hook: no code cave near %p", target); VirtualFree(stub, 0, MEM_RELEASE); return false; }
-
-    size_t p = 0;
-    stub[p++] = 0x8B; stub[p++] = 0x54; stub[p++] = 0x24; stub[p++] = 0x40;   // mov edx, [rsp+0x40]
-    stub[p++] = 0x51;                                                         // push rcx
-    stub[p++] = 0x41; stub[p++] = 0x50;
-    stub[p++] = 0x41; stub[p++] = 0x51;
-    stub[p++] = 0x41; stub[p++] = 0x52;
-    stub[p++] = 0x41; stub[p++] = 0x53;
-    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xEC; stub[p++] = 0x28;   // sub rsp, 0x28
-    stub[p++] = 0x48; stub[p++] = 0x89; stub[p++] = 0xF9;                     // mov rcx, rdi
-    stub[p++] = 0x48; stub[p++] = 0xB8;                                       // mov rax, imm64
-    uint64_t fn_addr = reinterpret_cast<uint64_t>(&on_flow_link_check);
-    std::memcpy(stub + p, &fn_addr, 8); p += 8;
-    stub[p++] = 0xFF; stub[p++] = 0xD0;                                       // call rax
-    stub[p++] = 0x48; stub[p++] = 0x83; stub[p++] = 0xC4; stub[p++] = 0x28;   // add rsp, 0x28
-    stub[p++] = 0x41; stub[p++] = 0x5B;
-    stub[p++] = 0x41; stub[p++] = 0x5A;
-    stub[p++] = 0x41; stub[p++] = 0x59;
-    stub[p++] = 0x41; stub[p++] = 0x58;
-    stub[p++] = 0x59;                                                         // pop rcx
-    stub[p++] = 0x89; stub[p++] = 0x44; stub[p++] = 0x24; stub[p++] = 0x40;   // mov [rsp+0x40], eax
-    // cmp [g_stay], eax with an absolute address (push/pop/mov leave the flags alone)
-    stub[p++] = 0x51;                                                         // push rcx
-    stub[p++] = 0x48; stub[p++] = 0xB9;                                       // mov rcx, imm64
-    uint64_t stay = g_stay_addr;
-    std::memcpy(stub + p, &stay, 8); p += 8;
-    stub[p++] = 0x39; stub[p++] = 0x01;                                       // cmp [rcx], eax
-    stub[p++] = 0x59;                                                         // pop rcx
-    stub[p++] = 0xFF; stub[p++] = 0x25;                                       // jmp [rip+0] -> rip_after
-    *reinterpret_cast<uint32_t *>(stub + p) = 0; p += 4;
-    uint64_t back = rip_after;
-    std::memcpy(stub + p, &back, 8); p += 8;
-    FlushInstructionCache(GetCurrentProcess(), stub, p);
-
-    {
-        DWORD cave_old = 0;
-        if (!VirtualProtect(cave, 16, PAGE_EXECUTE_READWRITE, &cave_old)) {
-            swofty::log("[instant-race] flow hook: VirtualProtect on the code cave failed");
-            VirtualFree(stub, 0, MEM_RELEASE);
-            return false;
-        }
-        cave[0] = 0xFF; cave[1] = 0x25;                                       // jmp [rip+0] -> stub
-        *reinterpret_cast<uint32_t *>(cave + 2) = 0;
-        uint64_t stub_addr = reinterpret_cast<uint64_t>(stub);
-        std::memcpy(cave + 6, &stub_addr, 8);
-        VirtualProtect(cave, 16, cave_old, &cave_old);
-        FlushInstructionCache(GetCurrentProcess(), cave, 16);
-    }
-
-    DWORD old_prot = 0;
-    if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &old_prot)) { swofty::log("[instant-race] flow hook: VirtualProtect failed"); return false; }
-    target[0] = 0xE9;
-    int32_t jmp_stub = static_cast<int32_t>(reinterpret_cast<uintptr_t>(cave) - reinterpret_cast<uintptr_t>(target + 5));
-    std::memcpy(target + 1, &jmp_stub, 4);
-    for (int i = 5; i < 10; ++i) target[i] = 0x90;
-    VirtualProtect(target, 16, old_prot, &old_prot);
-    FlushInstructionCache(GetCurrentProcess(), target, 16);
-
-    init_ui_route_hooks();
-    g_flow_hook_installed = true;
-    swofty::log("[instant-race] Installed flow link hook at %p -> cave %p -> stub %p", target, cave, stub);
-    return true;
+// Runs at site_FeFlow_AfterStateLink: the flow state machine has just called the active state's update, which wrote
+// the link it returns to [rsp+0x40]; rdi is the state. The next instruction loads that link for the compare with the
+// stay link, so replacing [rsp+0x40] here changes where the flow goes.
+void on_flow_site(SwoftyContext *c) {
+    if (!c) return;
+    auto *slot = reinterpret_cast<uint32_t *>(c->rsp + 0x40);
+    uint32_t link = *slot;
+    uint32_t next = on_flow_link_check(reinterpret_cast<uint8_t *>(c->rdi), link);
+    if (next != link) *slot = next;
 }
 
 // --- Direct Grand Prix Weekend Construction ---
@@ -2122,9 +1748,9 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     resolve_all_game_addrs();
 
     if (!g_addrs.game_manager || !g_addrs.set_mode || !g_addrs.mode_by_predicate || !g_addrs.gp_predicate) {
-        ilog("[instant-race] Missing core game manager / mode signatures (game_manager=%p set_mode=%p mode_by_predicate=%p gp_predicate=%p)",
+        ilog("[instant-race] Missing core game manager / mode bindings (game_manager=%p set_mode=%p mode_by_predicate=%p gp_predicate=%p)",
              (void *)g_addrs.game_manager, (void *)g_addrs.set_mode, (void *)g_addrs.mode_by_predicate, (void *)g_addrs.gp_predicate);
-        swofty::overlay::ui::toast(g_ui_state, "Instant Race: Core game signatures not found on this build.");
+        swofty::overlay::ui::toast(g_ui_state, "Instant Race needs a newer Swofty Launcher: update it and restart the game.");
         g_stage.store(static_cast<int>(LaunchStage::idle));
         return false;
     }
@@ -2161,10 +1787,9 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
 
     if (!g_addrs.rounds_component || !g_addrs.set_setup_mode ||
         !g_addrs.rounds_clear || !g_addrs.add_track || !g_addrs.build_season || !g_addrs.fill_entrants) {
-        ilog("[instant-race] Missing Grand Prix weekend setup signatures on this build (rounds_clear=%p add_track=%p build_season=%p fill_entrants=%p)",
+        ilog("[instant-race] Missing Grand Prix weekend setup bindings (rounds_clear=%p add_track=%p build_season=%p fill_entrants=%p)",
              (void *)g_addrs.rounds_clear, (void *)g_addrs.add_track, (void *)g_addrs.build_season, (void *)g_addrs.fill_entrants);
-        diag_find_functions("launch");
-        swofty::overlay::ui::toast(g_ui_state, "Instant Race: Update F1 25 to 1.0.145 for full GP launch support.");
+        swofty::overlay::ui::toast(g_ui_state, "Instant Race needs a newer Swofty Launcher: update it and restart the game.");
         g_stage.store(static_cast<int>(LaunchStage::idle));
         return false;
     }
@@ -2446,9 +2071,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         // have no session (phantom first lap, fastest-lap spam). Lay the season's weekends out from the weekend
         // service's plan, as the game's weekend setup does (Sess_WeekendSetup_LayoutWeekends).
         static uintptr_t layout = 0;
-        if (!layout && swofty::api && swofty::api->resolve) layout = swofty::api->resolve("Sess_WeekendSetup_LayoutWeekends");
-        if (!layout)
-            layout = scan_pattern("41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 78 C5 F8 29 74 24 60 48 89 CE 48 8B 89 70 02 00 00 48 8B 01 FF 90 88 00 00 00");
+        if (!layout) layout = bind_name("Sess_WeekendSetup_LayoutWeekends");
         uint8_t *lsvc = g_addrs.weekend_service
             ? static_cast<uint8_t *>(registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)) : nullptr;
         void *svc_reg = nullptr, *svc_ent = nullptr;
@@ -2488,13 +2111,13 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
 }
 
 void on_flow_frame(double, void *) {
-    static int hook_tries = 0;
-    static uint64_t hook_last = 0;
-    if (!g_flow_hook_installed && swofty::api && swofty::api->module_base() && hook_tries < 30 &&
-        GetTickCount64() - hook_last > 1000) {
-        hook_last = GetTickCount64();
-        ++hook_tries;
-        install_flow_hook();
+    if (swofty::api && swofty::api->module_base()) {
+        static uint64_t last_try = 0;
+        if (!g_addrs.scanned && GetTickCount64() - last_try > 1000) {
+            last_try = GetTickCount64();
+            resolve_all_game_addrs();
+        }
+        init_ui_route_hooks();
     }
     int st = g_stage.load();
     if (st == static_cast<int>(LaunchStage::leave_frontend) && GetTickCount64() - g_stage_ts > 60000) {
@@ -2625,6 +2248,13 @@ uint32_t toggle_vk() {
 }
 
 void trigger_launch() {
+    resolve_all_game_addrs();
+    if (!g_flow_hook_installed || !g_addrs.scanned) {
+        ilog("[instant-race] Launch refused: launcher bindings missing (%s)",
+             g_flow_hook_installed ? g_missing_bindings.c_str() : "site_FeFlow_AfterStateLink");
+        swofty::overlay::ui::toast(g_ui_state, "Instant Race needs a newer Swofty Launcher: update it and restart the game.");
+        return;
+    }
     if (g_raced_once) ilog("[instant-race] Another Instant Race in this game session");
     if (g_cfg.surprise) randomize_all();
     sync_distance_laps();
@@ -2934,6 +2564,18 @@ bool init_plugin() {
                     nullptr});
             break;
         }
+    }
+
+    // The flow site carries the whole launch (leaving the menu, the load sync, returning to the menu). Without it
+    // Instant Race stays off; registering a mixin on a binding the launcher lacks would drop the addon.
+    if (swofty::api->resolve("site_FeFlow_AfterStateLink") != 0) {
+        swofty::detail::append(swofty::detail::mixins,
+            new swofty::detail::node{
+                {"site_FeFlow_AfterStateLink", SWOFTY_MIXIN_SITE, 0, reinterpret_cast<void *>(&on_flow_site), nullptr},
+                nullptr});
+        g_flow_hook_installed = true;
+    } else {
+        swofty::log("[instant-race] site_FeFlow_AfterStateLink is not in this Swofty Launcher; update the launcher to use Instant Race");
     }
 
     g_tod_build = reinterpret_cast<TodBuildFn *>(swofty::api->resolve("Sess_Tod_BuildSessionDataset_Thunk"));
