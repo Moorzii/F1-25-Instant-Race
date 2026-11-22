@@ -433,6 +433,7 @@ struct RaceConfig {
     std::string weather = "Dry";
     int time_of_day = 0; // index into kTimesOfDay (0 = the track's default)
     float laps = 5.0f;
+    int distance = 0; // index into kDistances: 0 = the lap slider, else a share of the track's real race distance
     float ai_difficulty = 85.0f;
     bool surprise = false; // hide era/car/track/weather and roll them at Start
 };
@@ -968,6 +969,44 @@ void reroll_track() {
         g_cfg.track_id = t.id;
         g_cfg.track_label = t.label;
     }
+}
+
+// Race distance presets: a share of the track's real Grand Prix lap count (the 2025 calendar's numbers; reverse layouts
+// use their forward track's). Add-on tracks have no real F1 race to go by, so they use kAddonFullLaps as their full
+// distance.
+struct DistanceChoice {
+    const char *label;
+    float share; // 0 = custom (the slider)
+};
+constexpr DistanceChoice kDistances[] = {{"Custom", 0.0f}, {"Short", 0.25f}, {"Half", 0.5f}, {"Full Distance", 1.0f}};
+constexpr int kDistancesCount = int(sizeof(kDistances) / sizeof(kDistances[0]));
+constexpr int kAddonFullLaps = 60;
+
+int real_race_laps(std::string id) {
+    static const std::pair<const char *, int> kLaps[] = {
+        {"melbourne", 58}, {"shanghai", 56}, {"suzuka", 53}, {"bahrain", 57}, {"jeddah", 50}, {"miami", 57},
+        {"imola", 63}, {"monaco", 78}, {"catalunya", 66}, {"montreal", 70}, {"austria", 71}, {"silverstone", 52},
+        {"spa_francorchamps", 44}, {"hungaroring", 70}, {"zandvoort", 72}, {"monza", 53}, {"baku", 51},
+        {"singapore", 62}, {"texas", 56}, {"mexico", 71}, {"brazil", 71}, {"las_vegas", 50}, {"losail", 57},
+        {"abu_dhabi", 58},
+    };
+    const std::string rev = "_reverse";
+    if (id.size() > rev.size() && id.compare(id.size() - rev.size(), rev.size(), rev) == 0) id.resize(id.size() - rev.size());
+    for (const auto &[name, laps] : kLaps)
+        if (id == name) return laps;
+    return 0;
+}
+
+// Laps for the current track under a distance preset (0 when the preset is Custom).
+int preset_laps(const RaceConfig &cfg) {
+    if (cfg.distance <= 0 || cfg.distance >= kDistancesCount) return 0;
+    int full = real_race_laps(cfg.track_id);
+    if (full <= 0) full = kAddonFullLaps;
+    return std::clamp(int(std::lround(full * kDistances[cfg.distance].share)), 1, 100);
+}
+
+void sync_distance_laps() {
+    if (int laps = preset_laps(g_cfg)) g_cfg.laps = float(laps);
 }
 
 void randomize_all() {
@@ -2579,6 +2618,10 @@ uint32_t toggle_vk() {
 void trigger_launch() {
     if (g_raced_once) ilog("[instant-race] Another Instant Race in this game session");
     if (g_cfg.surprise) randomize_all();
+    sync_distance_laps();
+    if (g_cfg.distance > 0)
+        ilog("[instant-race] Race distance: %s at %s = %.0f laps%s", kDistances[g_cfg.distance].label, g_cfg.track_id.c_str(),
+             g_cfg.laps, real_race_laps(g_cfg.track_id) ? "" : " (add-on track: no real F1 race, full distance taken as 60 laps)");
     g_menu_open = false;
     swofty::overlay::focus(false);
     g_was_focused = false;
@@ -2816,18 +2859,41 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
 
     }
 
-    // 5. Sliders: Race Distance (1-50 Laps) & AI Difficulty (0-110)
+    // 5. Race Distance (1-100 laps, or a share of the track's real race) & AI Difficulty
     float half_w = (body.w - gap) * 0.5f;
     float slider_h = u.u(48.0f);
-    if (ui::slider(u, {body.x, y, half_w, slider_h}, "Race Distance", g_cfg.laps, 1.0f, 50.0f, "%.0f Laps")) {
+    // In Surprise mode the track isn't known until Start, so a preset shows its name instead of a lap count.
+    bool preset_hidden = g_cfg.surprise && g_cfg.distance > 0;
+    if (!preset_hidden) sync_distance_laps();
+    char dist_fmt[64];
+    if (preset_hidden)
+        std::snprintf(dist_fmt, sizeof(dist_fmt), "%s (set at Start)", kDistances[g_cfg.distance].label);
+    else if (g_cfg.distance > 0)
+        std::snprintf(dist_fmt, sizeof(dist_fmt), "%%.0f Laps (%s)", kDistances[g_cfg.distance].label);
+    else
+        std::snprintf(dist_fmt, sizeof(dist_fmt), "%%.0f Laps");
+    if (ui::slider(u, {body.x, y, half_w, slider_h}, "Race Distance", g_cfg.laps, 1.0f, 100.0f, dist_fmt)) {
         g_cfg.laps = std::round(g_cfg.laps);
+        g_cfg.distance = 0; // moving the slider means a custom lap count
     }
     // The game's AI difficulty isn't set by the mod yet (its storage hasn't been found); races use the player's own
     // Grand Prix setting, so say so instead of showing a slider that does nothing.
     ui::label(u, {body.x + half_w + gap, y, half_w, slider_h * 0.5f}, "AI Difficulty: your Grand Prix setting", u.th.text);
     ui::label(u, {body.x + half_w + gap, y + slider_h * 0.5f, half_w, slider_h * 0.5f},
               "Change it in Grand Prix > Settings > Difficulty", u.th.dim);
-    y += slider_h + gap * 1.3f;
+    y += slider_h + gap * 0.6f;
+    {
+        float bw = (half_w - gap * 2) / 3.0f;
+        for (int d = 1; d < kDistancesCount; ++d) {
+            char lbl[48];
+            std::snprintf(lbl, sizeof(lbl), g_cfg.distance == d ? "> %s <" : "%s", kDistances[d].label);
+            if (ui::button(u, {body.x + (bw + gap) * float(d - 1), y, bw, u.u(36.0f)}, lbl)) {
+                g_cfg.distance = g_cfg.distance == d ? 0 : d; // pressing the chosen one again goes back to the slider
+                sync_distance_laps();
+            }
+        }
+        y += u.u(36.0f) + gap * 1.3f;
+    }
 
     // 6. Roll All & Launch Buttons
     float roll_w = u.u(230.0f);
