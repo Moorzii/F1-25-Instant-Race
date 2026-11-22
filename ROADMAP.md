@@ -19,6 +19,15 @@ On some loads every car spawns on the start/finish line instead of its grid slot
   Game_GridSlot_PlaceVehicle is not used for a Grand Prix). 4 good runs recorded on 20 Nov, no ghosted one yet: the
   next ghosted run with that logging is the comparison needed.
 
+- New lead (Send Logs, 21 Nov, Racingfox2309, 1.0.4): both bad grids they reported were later races in the session
+  that took the relayout path ("The weekend had no sessions after the build; laid out again"): Spa 2016 at 02:10
+  (grid out of order) and Zandvoort reverse 2023 at 07:53 (empty "Starting Grid" screen, AI with instant lap times).
+  Their other relayout races: Long Beach 2016 (09:06; the game then hung in StateUnloadSession on the way back to the
+  menu, load-stall report at 09:13), Austria reverse 2018 (09:46, outcome unknown), Laguna Seca 2022 (10:07; crashed
+  at F1_25.exe+0x6599b0, reading 0x128, 16 ms after StateLoadSession exited, flow state machine on the stack). None of
+  their races without relayout was reported bad. Brad's own ghosted runs (1.0.3, first loads) did not take this
+  path, so there may be two causes. Next: find why the weekend loses its sessions on some later launches (era or track
+  change doesn't explain it), and what Sess_WeekendSetup_LayoutWeekends resets besides the sessions (grid order?).
 - Swofty 1.10.0 (20 Nov) skips the game's 3 s minimum loading screen. If the ghost grid is a timing race with the menu
   scene, it may now show up more or less often: note the launcher version with every ghosted report.
 
@@ -110,6 +119,12 @@ Option to choose where the player starts (P1 to the back), or random.
 
 ## Player reports to look at
 - **Tyre strategy and fuel (reported 20 Nov):** a player could not change their tyre strategy and their car was under-fuelled. Likely the race-only weekend / custom lap count not reaching the game's fuel and strategy setup. Need their instant_race.log, session folder, and the era/track/race length.
+- **EA version (report from 21 Nov, launcher 1.10.21):** every 1.0.4 byte pattern matched on the EA exe, but the
+  launch stopped at "loaded slots in EntrantsSystem: 0" / "No loaded entrant list found" (68 lists in the DB). An
+  EntrantsSystem offset or lookup probably differs on EA; Brad has no EA copy to test.
+- **Crash attributed to Instant Race (report-05, 21 Nov):** access violation at F1_25.exe+0xaf76f1 inside the game's
+  own Game_ChampionshipGameMode_BuildSessionSettings during a normal Grand Prix; Instant Race's wrap was only passing
+  through (no launch that session), but crash reports name instant_race.dll because the wrap is on the stack.
 - **Crash while loading (Racingfox2309, 1.0.3):** 2026 season, Silverstone reverse layout, Toro Rosso. Null call at F1_25.exe+0x2cf07f2, 16 s into loading, no Instant Race frame on the stack, not repeated (their 2024 Zandvoort and 2019 Hockenheim races loaded and finished). Check whether the reverse layout or the 2026 grid is involved.
 - **Aston Martin seated at "Force India" (same player): not a bug.** Swofty's 2021+ grids keep Aston Martin in the
   Force India slot (sw24_force_india is the 2024 Aston Martin: Stroll/Alonso; the 2024 grid has no other candidate).
