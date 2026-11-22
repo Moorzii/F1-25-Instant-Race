@@ -122,6 +122,10 @@ Option to choose where the player starts (P1 to the back), or random.
 - **EA version (report from 21 Nov, launcher 1.10.21):** every 1.0.4 byte pattern matched on the EA exe, but the
   launch stopped at "loaded slots in EntrantsSystem: 0" / "No loaded entrant list found" (68 lists in the DB). An
   EntrantsSystem offset or lookup probably differs on EA; Brad has no EA copy to test.
+- **One-off load crash (Racingfox2309, 22 Nov 08:46, 1.0.4):** first Instant Race of the session (Melbourne, f1_2025,
+  wet, Surprise); null virtual call at F1_25.exe+0x2cf07f2 on the UI thread as flow #7c8bb060 entered (driver names
+  screen), 11 s after Instant Race's last step. Did not repeat: a normal wet Grand Prix at Melbourne, a dry Instant
+  Race and a wet Instant Race all loaded afterwards. Watch for the same address in future logs.
 - **Crash attributed to Instant Race (report-05, 21 Nov):** access violation at F1_25.exe+0xaf76f1 inside the game's
   own Game_ChampionshipGameMode_BuildSessionSettings during a normal Grand Prix; Instant Race's wrap was only passing
   through (no launch that session), but crash reports name instant_race.dll because the wrap is on the stack.
