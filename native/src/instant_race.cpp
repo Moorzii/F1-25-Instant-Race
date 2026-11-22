@@ -430,7 +430,7 @@ struct RaceConfig {
     std::string driver_label = "Random Driver";
     std::string track_id = "silverstone";
     std::string track_label = "Silverstone";
-    std::string weather = "Dry";
+    std::string weather = "Clear";
     int time_of_day = 0; // index into kTimesOfDay (0 = the track's default)
     float laps = 5.0f;
     int distance = 0; // index into kDistances: 0 = the lap slider, else a share of the track's real race distance
@@ -458,12 +458,18 @@ const char *time_of_day_label(int i) { return kTimesOfDay[(i >= 0 && i < kTimesO
 
 // "Dry to Wet" / "Wet to Dry" are parked: rebuilding the datasets after the game's build gives a white screen
 // (ROADMAP "Changing weather"). Add them back here once the custom-slot route works.
-constexpr const char *kWeathers[] = {"Dry", "Wet"};
+// Fixed weather for the whole race. The index is the game's weather type (0 clear .. 5 storm).
+constexpr const char *kWeathers[] = {"Clear", "Light Cloud", "Overcast", "Light Rain", "Heavy Rain", "Storm"};
 constexpr int kWeathersCount = int(sizeof(kWeathers) / sizeof(kWeathers[0]));
 const char *next_weather(const std::string &w) {
     for (int i = 0; i < kWeathersCount; ++i)
         if (w == kWeathers[i]) return kWeathers[(i + 1) % kWeathersCount];
     return kWeathers[0];
+}
+uint8_t weather_type(const std::string &w) {
+    for (int i = 0; i < kWeathersCount; ++i)
+        if (w == kWeathers[i]) return uint8_t(i);
+    return w == "Wet" ? 4 : 0;
 }
 
 std::mutex g_mutex;
@@ -1012,8 +1018,9 @@ void sync_distance_laps() {
 void randomize_all() {
     reroll_era();
     reroll_track();
-    std::uniform_int_distribution<int> wdist(0, 3);
-    g_cfg.weather = (wdist(g_rng) == 0) ? "Wet" : "Dry";
+    // Mostly dry, about a third of races wet: clear 30, light cloud 20, overcast 15, light rain 15, heavy rain 12, storm 8.
+    std::discrete_distribution<int> wdist({30, 20, 15, 15, 12, 8});
+    g_cfg.weather = kWeathers[wdist(g_rng)];
     std::uniform_int_distribution<int> tdist(0, kTimesOfDayCount - 1);
     g_cfg.time_of_day = tdist(g_rng);
 }
@@ -1148,6 +1155,7 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
     float race_s = 0.0f;
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xb74 + 8 * 0x44)) {
         bool want_wet = false;
+        uint8_t wx_type = 0;
         int tod = 0;
         std::string weather;
         scripted = false;
@@ -1155,7 +1163,8 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
         {
             std::lock_guard lock(g_mutex);
             weather = g_cfg.weather;
-            want_wet = (weather == "Wet");
+            wx_type = weather_type(weather);
+            want_wet = wx_type >= 3;
             tod = g_cfg.time_of_day;
             laps = g_cfg.laps;
         }
@@ -1187,7 +1196,7 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
             race_s = std::max(1.0f, laps) * kSecondsPerLap;
         }
         {
-            uint8_t type = want_wet ? 4 : 0;
+            uint8_t type = scripted ? (want_wet ? 4 : 0) : wx_type;
             settings[0xb18] = 0;
             *reinterpret_cast<uint32_t *>(settings + 0xb14) = 0;
             for (int d = 0; d < 8; ++d) {
@@ -1198,7 +1207,7 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
                     slot[0x3e + k] = type;
                 }
             }
-            ilog("[instant-race] Session weather set to %s (all datasets, custom slot), start time %s", want_wet ? "heavy rain" : "clear",
+            ilog("[instant-race] Session weather set to %s (all datasets, custom slot), start time %s", kWeatherKinds[type < 6 ? type : 0],
                  time_of_day_label(tod));
         }
     }
