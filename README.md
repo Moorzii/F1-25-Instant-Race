@@ -2,23 +2,43 @@
 
 Skip the menus and jump straight into a race in F1 25 (Swofty Launcher addon).
 
+F1 2017 had an Instant Race option that dropped you into a race with a random driver at a random circuit. Players have
+asked for it back ever since; this addon brings it to F1 25 and lets you choose (or roll) everything about the race.
+
 ## How to use
 1. Press **F7** on the main menu (you can change the key in the addon's settings).
 2. Pick an era, car and driver, track, weather, time of day and race length, or press **Roll All Random**.
+   Race length is a lap slider (1-100) or **Short**, **Half** or **Full Distance**, which follow the real race length of
+   the circuit (Monaco 78 laps, Spa 44, ...).
 3. Press **START INSTANT RACE**.
 
 **Surprise mode:** turn on **Surprise** and the era, car and driver, circuit, weather and time of day are picked at random and kept hidden until the race loads. Race length still uses your setting.
 
-Any Swofty season you have installed (2012 onwards, plus F1 25) appears in the era list automatically, and installed track addons appear in the circuit list. The Swofty season packs provide the period grids, cars and liveries.
+Any season you have installed appears in the era list automatically: Swofty's seasons, F1 25, and season packs from other authors. Installed track addons appear in the circuit list.
+
+Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's own bindings.
 
 ## Known limitations
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
 - **Cars can occasionally spawn inside each other on the grid** when the race first loads. Restart the session from the pause menu and the grid lines up normally.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
+- Add-on tracks can take several minutes to load (Laguna Seca about 7). Leave the loading screen running.
+- Weather is fixed for the whole race; changing weather (dry to wet) isn't supported yet.
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
+**1.0.5**
+- **Time of day:** Track Default, Sunrise, Morning, Midday, Afternoon, Sunset or Night (night falls back to sunset at
+  tracks without floodlights).
+- **Six weather options:** Clear, Light Cloud, Overcast, Light Rain, Heavy Rain and Storm, instead of just Dry and Wet.
+- **Race distance:** the lap slider goes up to 100, plus Short, Half and Full Distance buttons that use each circuit's
+  real race length.
+- **More seasons:** season packs from other authors now show up in the era list too.
+- **Built on Swofty Launcher's bindings:** no own code patches or game searches any more, so it meets the Addon Browser
+  rules, starts without the short freeze on game start, and should keep working across launcher updates. Needs
+  launcher 1.10.29 or newer.
+
 **1.0.4** (first full release)
 - You no longer need to restart the game after an Instant Race. Career, Grand Prix and another Instant Race now all start normally afterwards, instead of a black screen or a hang on the main menu.
 - Fixed HRT (2012) putting you in the Caterham, and Toro Rosso (2013 and 2016) sometimes putting you in the Ferrari.

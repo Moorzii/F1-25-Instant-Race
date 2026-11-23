@@ -2,17 +2,19 @@
   "schema_version": 1,
   "id": "moorzii.instant-race",
   "name": "Instant Race",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "author": "Moorzii",
-  "description": "Skip the menus: pick (or randomise) an era, car, track and weather from your installed packs and jump straight into a race. Includes a Surprise mode. Press F7 on the main menu.",
+  "description": "Instant Race is back: like F1 2017's Instant Race, jump straight onto the grid. Pick (or randomise) an era, car, track, weather, time of day and race length from your installed seasons and tracks. Includes a Surprise mode. Press F7 on the main menu.",
   "license": "MIT",
   "repository": "https://github.com/Moorzii/F1-25-Instant-Race",
   "icon": "icon.png",
   "category": "utility",
-  "kind": ["native"],
+  "kind": [
+    "native"
+  ],
   "compat": {
     "game": "f1_25",
-    "launcher": ">=1.7.4"
+    "launcher": ">=1.10.29"
   },
   "requires": [
     {
@@ -20,7 +22,9 @@
       "version": ">=0.2.13"
     }
   ],
-  "experimental_features": ["overlay"],
+  "experimental_features": [
+    "overlay"
+  ],
   "options": [
     {
       "id": "menu_key",

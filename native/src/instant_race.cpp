@@ -53,7 +53,6 @@ constexpr size_t STATE_HASH                = 0x0b0;
 constexpr size_t STATE_STATUS              = 0x0b8;
 constexpr size_t STATE_CHILDREN            = 0x0c0;
 constexpr size_t STATE_CHILD               = 0xbd8;
-constexpr size_t STATE_PARENT              = 0xc10; // direct_start.cpp:125
 
 void ilog(const char *fmt, ...) {
     char buf[1024];
@@ -105,9 +104,6 @@ constexpr size_t   FE_INTERRUPT_FLAGS      = 0xf90;
 constexpr uint8_t  FE_CLOSING_GAME         = 0x08;
 constexpr uint32_t STATE_LOAD_SESSION      = 0x17e3cd0a;
 constexpr uint32_t STATE_SESSION           = 0x1505f42a;
-constexpr uint32_t LINK_STAY               = 0;
-constexpr uint32_t LINK_EXIT               = 0x0eef86be;
-constexpr uint32_t LINK_SESSION            = 0x8c23ce89;
 constexpr uint32_t FADE_FRONTEND           = 1u << 1;
 
 // --- Dynamically Resolved Game Addresses ---
@@ -366,7 +362,7 @@ std::string prettify_token(std::string s) {
     return s;
 }
 
-bool classify_era(const std::string &id, std::string &out_label) {
+[[maybe_unused]] bool classify_era(const std::string &id, std::string &out_label) {
     if (id == "f1_2025") {
         out_label = "F1 25";
         return true;
@@ -1051,7 +1047,7 @@ void hook_weather_setup(void *ws, uint8_t *settings, void *config) {
     }
 }
 
-// --- Flow State Machine Hook (scanned dynamically) ---
+// --- Flow State Machine Hook (site_FeFlow_AfterStateLink) ---
 std::atomic<uint8_t *> g_fe_node{nullptr};
 std::atomic<uint8_t *> g_fw_node{nullptr};
 
@@ -1237,107 +1233,6 @@ void choose_race_session() {
     } else {
         ilog("[instant-race] choose_race_session: weekend has no readable sessions");
     }
-}
-
-// --- UI Router & Activity Container Navigation (fe_home -> home_to_activity -> solo_gp) ---
-struct NeStr;
-using MakeNeStr_t = void (*)(NeStr **out, const char *s, int a3, int a4);
-using FireRoute_t = void (*)(void *router, void *vm, NeStr **name, uint64_t a4);
-using ContainerCmd_t = uint64_t (*)(void *container, NeStr **message, void *third);
-using FeHomeCmd_t = uint64_t (*)(void *vm, void *a2, void *a3);
-
-FireRoute_t orig_fire_route = nullptr;
-ContainerCmd_t orig_container_cmd = nullptr;
-FeHomeCmd_t orig_fehome_cmd = nullptr;
-
-std::atomic<void *> g_last_router{nullptr};
-std::atomic<void *> g_home_vm{nullptr};
-std::atomic<void *> g_container_vm{nullptr};
-std::atomic<void *> g_container_third{nullptr};
-std::atomic<uint64_t> g_container_at{0};
-std::atomic<bool> g_solo_gp_sent{false};
-std::atomic<bool> g_route_fired{false};
-uintptr_t a_fire_route = 0;
-uintptr_t a_make_nestr = 0;
-uintptr_t a_container_cmd = 0;
-
-uint32_t djb2_hash(const char *s) {
-    uint32_t h = 5381;
-    while (s && *s) {
-        h = ((h << 5) + h) ^ static_cast<uint8_t>(*s++);
-    }
-    return h;
-}
-
-uint64_t fehome_cmd_detour(void *vm, void *a2, void *a3) {
-    if (vm && swofty::mem::readable(vm, 0x260)) {
-        g_home_vm.store(vm);
-        void *r = *reinterpret_cast<void **>(static_cast<uint8_t *>(vm) + 0x28);
-        if (r) g_last_router.store(r);
-    }
-    return orig_fehome_cmd ? orig_fehome_cmd(vm, a2, a3) : 0;
-}
-
-void fire_route_detour(void *router, void *vm, NeStr **name, uint64_t a4) {
-    if (router) g_last_router.store(router);
-    if (orig_fire_route) orig_fire_route(router, vm, name, a4);
-}
-
-uint64_t container_cmd_detour(void *container, NeStr **message, void *third) {
-    if (container && g_container_vm.exchange(container) != container) {
-        g_container_at.store(GetTickCount64());
-        g_solo_gp_sent.store(false);
-    }
-    if (third) g_container_third.store(third);
-    return orig_container_cmd ? orig_container_cmd(container, message, third) : 0;
-}
-
-void init_ui_route_hooks() {
-    static std::atomic<bool> done{false};
-    if (done.exchange(true)) return;
-    a_make_nestr = bind_name("Ne_Make_StrFromCStr");
-    a_fire_route = bind_name("Vm_Fire_Route");
-    a_container_cmd = bind_name("Game_F1WorldActivityContainer_HandleCommand");
-    ilog("[instant-race] UI route bindings: make_str=%p fire_route=%p container_cmd=%p",
-         (void *)a_make_nestr, (void *)a_fire_route, (void *)a_container_cmd);
-}
-
-bool fire_ui_route(const char *group, const char *route) {
-    void *router = g_last_router.load();
-    if (!router || !a_fire_route || !a_make_nestr) {
-        swofty::log("[instant-race] Cannot fire route '%s' (router=%p, fire=0x%llx, nestr=0x%llx)",
-                    route, router, (unsigned long long)a_fire_route, (unsigned long long)a_make_nestr);
-        return false;
-    }
-    void *vm_arg = g_home_vm.load();
-    alignas(16) static uint8_t scratch[0x400];
-    if (!vm_arg || !swofty::mem::readable(vm_arg, 0x260)) {
-        std::memset(scratch, 0, sizeof(scratch));
-        *reinterpret_cast<uint32_t *>(scratch + 0x250) = djb2_hash(group);
-        vm_arg = scratch;
-    }
-    NeStr *name = nullptr;
-    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, route, 0, 0);
-    swofty::log("[instant-race] Firing UI route '%s' in group '%s' on router %p (vm=%p)", route, group, router, vm_arg);
-    if (orig_fire_route) {
-        orig_fire_route(router, vm_arg, &name, 0);
-    } else {
-        reinterpret_cast<FireRoute_t>(a_fire_route)(router, vm_arg, &name, 0);
-    }
-    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, nullptr, 0, 0);
-    return true;
-}
-
-void raise_container_cmd(const char *cmd) {
-    void *cvm = g_container_vm.load();
-    if (!cvm || !a_container_cmd || !a_make_nestr) return;
-    static uint8_t zero[0x100];
-    NeStr *name = nullptr;
-    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, cmd, 0, 0);
-    swofty::log("[instant-race] Raising container command '%s' on %p", cmd, cvm);
-    void *third = g_container_third.load();
-    reinterpret_cast<ContainerCmd_t>(a_container_cmd)(cvm, &name, third ? third : zero);
-    reinterpret_cast<MakeNeStr_t>(a_make_nestr)(&name, nullptr, 0, 0);
 }
 
 bool build_grand_prix_weekend(const RaceConfig &cfg);
@@ -2117,7 +2012,6 @@ void on_flow_frame(double, void *) {
             last_try = GetTickCount64();
             resolve_all_game_addrs();
         }
-        init_ui_route_hooks();
     }
     int st = g_stage.load();
     if (st == static_cast<int>(LaunchStage::leave_frontend) && GetTickCount64() - g_stage_ts > 60000) {
@@ -2190,7 +2084,7 @@ void *find_ai_difficulty_option() {
     }
     return nullptr;
 }
-void apply_ai_difficulty(int want) {
+[[maybe_unused]] void apply_ai_difficulty(int want) { // for the AI slider (ROADMAP 3)
     void *opt = find_ai_difficulty_option();
     if (!opt) { ilog("[instant-race] AI difficulty: option not found; the game's own setting is used"); return; }
     int before = ai_get_index(opt);
@@ -2276,7 +2170,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.4 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2589,32 +2483,8 @@ bool init_plugin() {
                 nullptr});
     }
 
-    if (swofty::api->resolve("FeHome_Handle_Command") != 0) {
-        swofty::detail::append(swofty::detail::mixins,
-            new swofty::detail::node{
-                {"FeHome_Handle_Command", SWOFTY_MIXIN_WRAP, 0,
-                 reinterpret_cast<void *>(&fehome_cmd_detour),
-                 reinterpret_cast<void **>(&orig_fehome_cmd)},
-                nullptr});
-    }
-    if (swofty::api->resolve("Vm_Fire_Route") != 0) {
-        swofty::detail::append(swofty::detail::mixins,
-            new swofty::detail::node{
-                {"Vm_Fire_Route", SWOFTY_MIXIN_WRAP, 0,
-                 reinterpret_cast<void *>(&fire_route_detour),
-                 reinterpret_cast<void **>(&orig_fire_route)},
-                nullptr});
-    }
-    if (swofty::api->resolve("Game_F1WorldActivityContainer_HandleCommand") != 0) {
-        swofty::detail::append(swofty::detail::mixins,
-            new swofty::detail::node{
-                {"Game_F1WorldActivityContainer_HandleCommand", SWOFTY_MIXIN_WRAP, 0,
-                 reinterpret_cast<void *>(&container_cmd_detour),
-                 reinterpret_cast<void **>(&orig_container_cmd)},
-                nullptr});
-    }
-
-    return true;}
+    return true;
+}
 
 } // namespace
 
@@ -2625,7 +2495,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.4 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
