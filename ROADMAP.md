@@ -169,6 +169,11 @@ Montreal (every car lap 1 at 75 s, while a normal launch is still lap 0 at 295 m
 starting grid, and four patches to it failed, so stop patching it. rebuild1: when the weekend comes back empty, run
 the whole build (plan, season build, weekend structure, entrants, seat) a second time and log the session count per
 pass; the old relayout stays only as a last resort.
+rebuild1 result (22:00, fresh save, Spa): the second build also left the weekend empty (pass 1: 0 sessions, pass 2: 0),
+so it fell back to the relayout and the race was broken again (empty grid screen, grid in vehicle order, fastest-lap
+spam, lap 2/5). Reverted. Five attempts at this path have failed: next step is asking the Swofty Manager bot which
+function makes the starting grid / race start state for a new Grand Prix weekend, and what the game's own Grand Prix
+start does on a new save that Game_CustomSeason_RebuildFromRounds does not.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
