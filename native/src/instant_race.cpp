@@ -1759,6 +1759,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             if (nm.find("f1_20") == std::string::npos && nm.find("sw_") == std::string::npos) continue;
             bool ok = read_db_int(row + ".stat_id", sid);
             void *pp = (ok && sid >= 0 && size_t(sid) < list_count) ? *reinterpret_cast<void **>(lists + size_t(sid) * 16 + 8) : nullptr;
+            (void)pp;
         }
     }
 
@@ -2127,7 +2128,6 @@ void on_session_end(const SwoftyEvent *, void *) {
     g_load_exit_ts = 0;
     g_load_sync_tries = 0;
     g_chose_sess.store(false);
-    g_route_fired.store(false);
     g_in_session.store(false);
 }
 
@@ -2164,7 +2164,6 @@ void trigger_launch() {
     g_load_exit_ts = 0;
     g_load_sync_tries = 0;
     g_chose_sess.store(false);
-    g_route_fired.store(false);
     g_session_at_ms.store(0);
     g_session_visible.store(false);
     g_last_fade_mask = ~0u;
