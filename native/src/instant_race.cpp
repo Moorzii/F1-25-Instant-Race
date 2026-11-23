@@ -832,7 +832,20 @@ void randomize_all() {
 }
 
 // --- Hooks for Laps & Weather ---
+bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list);
+std::atomic<void *> g_launch_list{nullptr};
+std::atomic<const uint8_t *> g_launch_tracks{nullptr};
+
 uint64_t hook_build_settings(void *mode, uint8_t *settings) {
+    if (g_stage.load() != static_cast<int>(LaunchStage::idle) && mode) {
+        // Check the track data lookup again right before the game's build, in case the entrant list's season was read
+        // again since the launch. Only for the entity this launch set up (same entrant list and track system).
+        void *lst = nullptr;
+        const uint8_t *trk = nullptr;
+        if (rd(mode, ENTITY_LIST, lst) && rd(mode, ENTITY_TRACKS, trk) && lst && lst == g_launch_list.load() &&
+            trk == g_launch_tracks.load())
+            ensure_track_data_set(static_cast<uint8_t *>(mode), trk, lst);
+    }
     uint64_t r = orig_build_settings ? orig_build_settings(mode, settings) : 0;
     int st = g_stage.load();
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xe00)) {
@@ -1639,6 +1652,70 @@ void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, co
          seat_idx, n, chosen_t.c_str(), chosen_d.c_str(), want_team.c_str(), want_driver.c_str());
 }
 
+// The session build reads the track's TRACK_DATA from the first data set (track system +0x68..+0x70, 0x30 rows)
+// whose masks hold the session's setup mode (+0x20), the entrant list's season (+0x24, only when the list names one)
+// and the weekend format (+0x28). If no set holds that mode and season together (a list that names a season its setup
+// mode has no data set for, e.g. season_2026 in a mode only the 2023-2025 sets list), the game reads a null track and
+// crashes on the loading screen. Returns the first matching set's track count, -1 when no set matches, -2 when the
+// sets can't be read.
+int track_data_set_items(const uint8_t *tracks, unsigned mode, bool season_used, unsigned season, unsigned format) {
+    const uint8_t *b = nullptr, *end = nullptr;
+    if (!rd(tracks, 0x68, b) || !rd(tracks, 0x70, end) || !b || end < b || (end - b) % 0x30) return -2;
+    if (mode >= 32 || (season_used && season >= 32) || format >= 2) return -1;
+    for (const uint8_t *s = b; s < end && s < b + 0x30 * 64; s += 0x30) {
+        uint32_t m = 0, sz = 0, f = 0;
+        if (!rd(s, 0x20, m) || !rd(s, 0x24, sz) || !rd(s, 0x28, f)) return -2;
+        if (!((m >> mode) & 1) || (season_used && !((sz >> season) & 1)) || !((f >> format) & 1)) continue;
+        const uint8_t *ib = nullptr, *ie = nullptr;
+        if (!rd(s, 0x08, ib) || !rd(s, 0x10, ie) || !ib || ie < ib) return 0;
+        int n = 0;
+        for (const uint8_t *i = ib; i < ie && i < ib + 16 * 256; i += 16) {
+            void *t = nullptr;
+            if (rd(i, 8, t) && t) ++n;
+        }
+        return n;  // the game takes the first matching set and never tries a later one
+    }
+    return -1;
+}
+
+// Make sure the session build will find track data for this setup mode and entrant list. When the list's season has
+// no data set in this mode, leave the season out of the lookup (as for a list that names no season), so the mode's
+// own data set is used. Returns false only when even that finds nothing.
+bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list) {
+    void *gsm = nullptr;
+    uint8_t mode = 0;
+    uint8_t *lst = static_cast<uint8_t *>(list);
+    if (!rd(e, 0x2b0, gsm) || !gsm || !rd(gsm, 0x80, mode) || !lst || !swofty::mem::readable(lst + 0xb0, 2)) {
+        ilog("[instant-race] Track data check skipped (mode or list not readable)");
+        return true;
+    }
+    const unsigned season = lst[0xb0];
+    const bool season_used = lst[0xb1] != 0;
+    int n = track_data_set_items(tracks, mode, season_used, season, 0);
+    if (n == -2) {
+        ilog("[instant-race] Track data check skipped (data sets not readable)");
+        return true;
+    }
+    if (n > 0) {
+        ilog("[instant-race] Track data: mode %u, season %u%s -> a data set with %d track(s)",
+             unsigned(mode), season, season_used ? "" : " (not used)", n);
+        return true;
+    }
+    if (season_used) {
+        int m = track_data_set_items(tracks, mode, false, 0, 0);
+        if (m > 0) {
+            lst[0xb1] = 0;
+            ilog("[instant-race] Track data: no data set for mode %u with the list's season %u; the season is left out "
+                 "of the lookup so the mode's own data set (%d track(s)) is used instead of a crash on loading",
+                 unsigned(mode), season, m);
+            return true;
+        }
+    }
+    ilog("[instant-race] Track data: no data set for mode %u (season %u%s): launch refused", unsigned(mode), season,
+         season_used ? "" : ", not used");
+    return false;
+}
+
 bool build_grand_prix_weekend(const RaceConfig &cfg) {
     resolve_all_game_addrs();
 
@@ -1859,6 +1936,14 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     if (!track) {
         ilog("[instant-race] Track '%s' not found in Grand Prix track system - aborting launch", cfg.track_id.c_str());
         swofty::overlay::ui::toast(g_ui_state, "Track '" + cfg.track_label + "' not mounted yet - reroll track!");
+        g_stage.store(static_cast<int>(LaunchStage::idle));
+        return false;
+    }
+
+    g_launch_list.store(list);
+    g_launch_tracks.store(tracks);
+    if (!ensure_track_data_set(e, tracks, list)) {
+        swofty::overlay::ui::toast(g_ui_state, "This season has no track data in a Grand Prix - pick another season.");
         g_stage.store(static_cast<int>(LaunchStage::idle));
         return false;
     }
