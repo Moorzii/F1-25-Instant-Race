@@ -106,7 +106,7 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
   Instant Race raised it on the first state its hook saw (e4ef00ba, a parent) and kept it set for ~3 s until
   StateFrontendWorld had no child, long enough for the parents to latch it.
 
-## 4a. Crash on loading: no track data set for the list's season (fix on `next`, test build td2)
+## 4a. Crash on loading: no track data set for the list's season (fix on `next`, tested with td2/td3, for 1.0.6)
 
 Report 23 Nov (launcher 1.10.30): two launches crashed the same way on the loading screen, null read of +0x268 at
 F1_25.exe+0x2508873, inside BuildSessionSettings (called from our wrap). `Game_TrackData_GetTrack` (1.0.145 0x2e63390)
@@ -131,6 +131,21 @@ way back to the menu). Hide slots that don't resolve, or show them by the add-on
 ## 5. Starting grid slot
 Option to choose where the player starts (P1 to the back), or random.
 - Swofty docs: `session.grid.build` event (`Game_GridSetup_SetupStartingGrid`) and the grid placement functions in `std/systems/sessions`.
+
+## 6. Other languages (planned for 1.0.7)
+
+Today all of Instant Race's own text is English, written into the code: the F7 menu, buttons, toasts and the loading
+card. Season, team, driver and track names are prettified from the game's ids, so they don't follow the game's
+language either.
+
+- Move every UI string into one table keyed by language, English as the fallback.
+- Language choice: an option in the F7 menu, remembered in addon storage. Following the game's own language setting
+  needs a way to read it; the Swofty SDK's `swofty::lang` only overrides game strings and has no "current language"
+  call, so that would be extra RE work (later, optional).
+- First languages: French, German, Spanish, Italian, Portuguese (BR), Polish. Check accented text in the overlay's
+  built-in font on the PC. Japanese / Chinese only if that font has the glyphs.
+- Track names could use the game's own localized names (lng_* keys) instead of prettified ids, if they can be read.
+- Ask native speakers on the Discord to check the translations before release.
 
 ## Smaller items
 - Start-up hitch: resolve_all_game_addrs runs ~20 pattern scans over the whole exe on the first on_frame (~1.1 s,
