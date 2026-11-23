@@ -300,6 +300,12 @@ bool g_scene_despawned = false;
 std::atomic<uint8_t *> g_flow_root{nullptr};
 bool g_flow_hook_installed = false;
 bool g_raced_once = false; // an Instant Race has run in this game session (log only)
+// Grid diagnostics (log only): per launch, how often the game built session settings, whether the weekend was laid
+// out again, and where the cars stand once the session is live.
+std::atomic<int> g_launch_no{0};
+std::atomic<int> g_bss_calls{0}, g_bss_race{0}, g_bss_idle_logged{0};
+std::atomic<bool> g_relaid{false};
+int g_grid_snaps = 0;
 
 std::mt19937 g_rng{static_cast<unsigned>(GetTickCount64())};
 
@@ -848,6 +854,16 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
     }
     uint64_t r = orig_build_settings ? orig_build_settings(mode, settings) : 0;
     int st = g_stage.load();
+    {
+        uint32_t sid0 = settings && swofty::mem::readable(settings, 8) ? *reinterpret_cast<uint32_t *>(settings + 4) : 0xffffffffu;
+        if (st != static_cast<int>(LaunchStage::idle)) {
+            int n = ++g_bss_calls;
+            if (sid0 >= 15 && sid0 <= 17) ++g_bss_race;
+            ilog("[instant-race] grid: BuildSessionSettings #%d of launch #%d (session id %u)", n, g_launch_no.load(), sid0);
+        } else if (g_launch_no.load() > 0 && g_bss_idle_logged.fetch_add(1) < 12) {
+            ilog("[instant-race] grid: BuildSessionSettings while no launch is running (session id %u)", sid0);
+        }
+    }
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xe00)) {
         uint32_t sid = *reinterpret_cast<uint32_t *>(settings + 4);
         if (sid >= 15 && sid <= 17) {
@@ -1375,6 +1391,9 @@ extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link)
             g_raced_once = true;
             clear_menu_exit_latches();
             ilog("[instant-race] Session active! Handover complete.");
+            ilog("[instant-race] grid: launch #%d reached the session: BuildSessionSettings %d call(s), %d for a race "
+                 "session; weekend laid out again: %s", g_launch_no.load(), g_bss_calls.load(), g_bss_race.load(),
+                 g_relaid.load() ? "yes" : "no");
         }
     } else if (st == static_cast<int>(LaunchStage::done)) {
         note_session_fade();
@@ -2079,6 +2098,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             hand_plan("before laying out the weekend");
             reinterpret_cast<void (*)(void *)>(layout)(lsvc);
             wk = current_weekend(modes);
+            g_relaid.store(true);
             ilog("[instant-race] The weekend had no sessions after the build; laid out again: %zu session(s)",
                  weekend_session_count(wk));
         } else {
@@ -2106,12 +2126,61 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     return true;
 }
 
+// Log where every car is: the live classification order with each car's lap, lap distance and position on the map,
+// and how many cars stand within 3 m of another one (cars stacked on the start line instead of in grid slots).
+void log_grid_snapshot(int which) {
+    namespace live = swofty::live;
+    auto ses = live::session();
+    if (!live::available() || !ses) {
+        ilog("[instant-race] grid: snapshot %d: live state not available", which);
+        return;
+    }
+    auto ord = live::order();
+    std::vector<live::Car> cars;
+    for (uint32_t id : ord.ids)
+        if (auto c = live::car(id)) cars.push_back(*c);
+    if (cars.empty()) {
+        for (uint32_t v = 0; v < live::max_cars; ++v)
+            if (auto c = live::car(v); c && live::is_racer(*c)) cars.push_back(*c);
+    }
+    int stacked = 0;
+    for (size_t i = 0; i < cars.size(); ++i) {
+        for (size_t j = 0; j < cars.size(); ++j) {
+            if (i == j || !live::has(cars[i], SWOFTY_LIVE_HAVE_WORLD) || !live::has(cars[j], SWOFTY_LIVE_HAVE_WORLD)) continue;
+            float dx = cars[i].world_pos[0] - cars[j].world_pos[0], dz = cars[i].world_pos[2] - cars[j].world_pos[2];
+            if (dx * dx + dz * dz < 9.0f) { ++stacked; break; }
+        }
+    }
+    ilog("[instant-race] grid: snapshot %d (%u s after the session went live): type %u, %u car(s), %u racer(s), "
+         "player vehicle %d, %zu in order, %d within 3 m of another car", which, which == 1 ? 5u : 20u, ses->type,
+         ses->cars, ses->racers, ses->player, cars.size(), stacked);
+    std::string line;
+    for (size_t i = 0; i < cars.size(); ++i) {
+        const auto &c = cars[i];
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "%sP%d v%u%s lap %d %.0fm (%.0f,%.0f)", line.empty() ? "" : "; ", c.position,
+                      c.vehicle, live::is_player(c) ? "*" : "", c.lap, c.lap_m, c.world_pos[0], c.world_pos[2]);
+        line += buf;
+        if ((i + 1) % 6 == 0 || i + 1 == cars.size()) {
+            ilog("[instant-race] grid:   %s", line.c_str());
+            line.clear();
+        }
+    }
+}
+
 void on_flow_frame(double, void *) {
     if (swofty::api && swofty::api->module_base()) {
         static uint64_t last_try = 0;
         if (!g_addrs.scanned && GetTickCount64() - last_try > 1000) {
             last_try = GetTickCount64();
             resolve_all_game_addrs();
+        }
+    }
+    {   // Grid snapshots 5 s and 20 s after an Instant Race session goes live.
+        uint64_t at = g_session_at_ms.load();
+        if (at && g_launch_no.load() > 0 && g_grid_snaps < 2 && GetTickCount64() - at >= (g_grid_snaps ? 20000u : 5000u)) {
+            ++g_grid_snaps;
+            log_grid_snapshot(g_grid_snaps);
         }
     }
     int st = g_stage.load();
@@ -2250,6 +2319,15 @@ void trigger_launch() {
         return;
     }
     if (g_raced_once) ilog("[instant-race] Another Instant Race in this game session");
+    {
+        int n = ++g_launch_no;
+        g_bss_calls.store(0);
+        g_bss_race.store(0);
+        g_bss_idle_logged.store(0);
+        g_relaid.store(false);
+        g_grid_snaps = 0;
+        ilog("[instant-race] grid: launch #%d of this game session", n);
+    }
     if (g_cfg.surprise) randomize_all();
     sync_distance_laps();
     if (g_cfg.distance > 0)
@@ -2269,7 +2347,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.5-td3 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5-grid1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2605,7 +2683,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.5-td3 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5-grid1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
