@@ -20,14 +20,25 @@ Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's ow
 
 ## Known limitations
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
-- **Cars can occasionally spawn inside each other on the grid** when the race first loads. Restart the session from the pause menu and the grid lines up normally.
+- **The first Instant Race on a new Grand Prix save can start oddly** (after deleting your Grand Prix save, or on a
+  profile that has never run one): an empty Starting Grid screen, cars inside each other or in the wrong order, a lap
+  counted at the start and "fastest lap" messages. Quit to the menu and launch again: the next race is normal. A fix is
+  planned for 1.0.7.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
-- Add-on tracks can take several minutes to load (Laguna Seca about 7). Leave the loading screen running.
+- Add-on tracks can take several minutes to load (Laguna Seca about 7); the loading card says so. Leave it running.
 - Weather is fixed for the whole race; changing weather (dry to wet) isn't supported yet.
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
+**1.0.6**
+- **Fuel fixed:** every car (yours and the AI's) was fuelled for a 5-lap race whatever distance you picked, so longer
+  races ran short of fuel after a few laps. The game now fuels the race for the distance you chose.
+- **Loading crash fixed:** some extra seasons made the game crash on the loading screen because the game had no track
+  data for them in a Grand Prix. Instant Race now checks first and runs them with track data that exists.
+- **Add-on track note:** the loading card says when an add-on track can take a few minutes to load.
+- More detail in the log for bug reports (grid positions at the start of each race).
+
 **1.0.5**
 - **Time of day:** Track Default, Sunrise, Morning, Midday, Afternoon, Sunset or Night (night falls back to sunset at
   tracks without floodlights).

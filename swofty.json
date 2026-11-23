@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "moorzii.instant-race",
   "name": "Instant Race",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "author": "Moorzii",
   "description": "Instant Race is back: like F1 2017's Instant Race, jump straight onto the grid. Pick (or randomise) an era, car, track, weather, time of day and race length from your installed seasons and tracks. Includes a Surprise mode. Press F7 on the main menu.",
   "license": "MIT",
