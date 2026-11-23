@@ -162,6 +162,13 @@ before the timing line, were already on lap 1). Every launch without relayout to
 Sess_WeekendSetup_LayoutWeekends directly; the game reaches it through the WeekendSetupComponent's vtable slot +0x290,
 whose body calls LayoutWeekends first and then does more. layout1 calls slot +0x290 instead (logging the vtable), to
 test whether the skipped rest is what sets up the grid screen, the plan's race length and the start line state.
+layout1 results (21:34-21:44): slot +0x290 (vtable game+0x567fc60, slot 0x140b797f0) made no difference. Relayout
+launches: no starting grid at all, the grid order is the vehicle order v0, v1, v2... (a normal launch is shuffled, e.g.
+v16, v3, v10), all cars on one spot at Bahrain (with DSQ messages), an empty grid screen, and the phantom lap at
+Montreal (every car lap 1 at 75 s, while a normal launch is still lap 0 at 295 m). The relayout path never makes a
+starting grid, and four patches to it failed, so stop patching it. rebuild1: when the weekend comes back empty, run
+the whole build (plan, season build, weekend structure, entrants, seat) a second time and log the session count per
+pass; the old relayout stays only as a last resort.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays

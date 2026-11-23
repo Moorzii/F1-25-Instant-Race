@@ -2100,55 +2100,67 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             ilog("[instant-race] Session plan NOT handed over %s (alloc=%p gsm=%p svc=%p)", when, p_alloc, p_gsm, p_svc);
         }
     };
-    hand_plan("before the season build");
-    reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
-    {
-        uint8_t *gp_mode = nullptr, *cur_mode = nullptr;
-        rd(e, ENTITY_MODE, gp_mode);
-        rd(modes, 0x88, cur_mode);
-        g_gp_mode.store(gp_mode);
-        if (cur_mode != gp_mode)
-            ilog("[instant-race] Note: the game's current mode (%p) is not the Grand Prix mode (%p) after the switch", cur_mode, gp_mode);
-    }
-
-    g_track_stat.store(track[1]);
-    uint8_t *wk = current_weekend(modes);
-    if (wk) wk[WK_TRACK] = track[1];
-    else ilog("[instant-race] current weekend not readable after season build (will retry at load)");
-
-    if (evt && swofty::mem::readable(evt, 0xf0)) {
-        reinterpret_cast<void (*)(void *)>(evt[0xe8 / 8])(e);
-    }
-    void *alloc = nullptr, *cur_gsm = nullptr;
-    rd(rounds, 0x210, alloc);
-    rd(e, 0x2b0, cur_gsm);
-    void *svc = g_addrs.weekend_service
-        ? registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)
-        : nullptr;
-    uint64_t race_kind = race_length;
-    ilog("[instant-race] Weekend race length = %llu (%s)", (unsigned long long)race_kind,
-         race_kind == 4 ? "25%" : race_kind == 5 ? "35%" : race_kind == 6 ? "50%" : "100%");
-    if (!(alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8))) {
-        ilog("[instant-race] Weekend structure NOT built (alloc=%p gsm=%p svc=%p fn=%p)", alloc, cur_gsm, svc,
-             (void *)g_addrs.weekend_structure);
-    }
-    if (alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8)) {
-        alignas(16) uint8_t wlist[0x38]{};
-        *reinterpret_cast<void **>(wlist + 8) = alloc;
-        *reinterpret_cast<void **>(wlist + 0x10) = alloc;
-        reinterpret_cast<void (*)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)>(
-            g_addrs.weekend_structure)(wlist, cur_gsm, 0, 0, race_kind, 0, 1, 0, 0);
-        auto **svt = *reinterpret_cast<void ***>(svc);
-        if (svt && swofty::mem::readable(svt, 0x270)) {
-            reinterpret_cast<void (*)(void *, void *, int)>(svt[0x268 / 8])(svc, wlist, 1);
+    // A fresh Grand Prix save (one Instant Race has not run on yet) comes back from the season build with an empty
+    // weekend. Laying it out again by hand (Sess_WeekendSetup_LayoutWeekends, or the component's slot +0x290) gives a
+    // race with no starting grid: cars in vehicle order or all on one spot, an empty grid screen, the start not
+    // registered (phantom first lap, fastest-lap spam, disqualifications). Build the whole weekend a second time
+    // instead, so the game makes the sessions and the grid itself.
+    uint8_t *wk = nullptr;
+    for (int pass = 1; pass <= 2; ++pass) {
+        hand_plan("before the season build");
+        reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
+        {
+            uint8_t *gp_mode = nullptr, *cur_mode = nullptr;
+            rd(e, ENTITY_MODE, gp_mode);
+            rd(modes, 0x88, cur_mode);
+            g_gp_mode.store(gp_mode);
+            if (cur_mode != gp_mode)
+                ilog("[instant-race] Note: the game's current mode (%p) is not the Grand Prix mode (%p) after the switch", cur_mode, gp_mode);
         }
-    }
 
-    alignas(16) static uint8_t blk[0x190];
-    std::memset(blk, 0, sizeof(blk));
-    *reinterpret_cast<uint64_t *>(blk + 0x180) = 1;
-    reinterpret_cast<void (*)(void *, void *, void *, int)>(g_addrs.fill_entrants)(es, e, blk, 0);
-    seat_player_on_grid(e, mgr, cfg.team_id, cfg.driver_id);
+        g_track_stat.store(track[1]);
+        wk = current_weekend(modes);
+        if (wk) wk[WK_TRACK] = track[1];
+        else ilog("[instant-race] current weekend not readable after season build (will retry at load)");
+
+        if (evt && swofty::mem::readable(evt, 0xf0)) {
+            reinterpret_cast<void (*)(void *)>(evt[0xe8 / 8])(e);
+        }
+        void *alloc = nullptr, *cur_gsm = nullptr;
+        rd(rounds, 0x210, alloc);
+        rd(e, 0x2b0, cur_gsm);
+        void *svc = g_addrs.weekend_service
+            ? registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)
+            : nullptr;
+        uint64_t race_kind = race_length;
+        ilog("[instant-race] Weekend race length = %llu (%s)", (unsigned long long)race_kind,
+             race_kind == 4 ? "25%" : race_kind == 5 ? "35%" : race_kind == 6 ? "50%" : "100%");
+        if (!(alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8))) {
+            ilog("[instant-race] Weekend structure NOT built (alloc=%p gsm=%p svc=%p fn=%p)", alloc, cur_gsm, svc,
+                 (void *)g_addrs.weekend_structure);
+        }
+        if (alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8)) {
+            alignas(16) uint8_t wlist[0x38]{};
+            *reinterpret_cast<void **>(wlist + 8) = alloc;
+            *reinterpret_cast<void **>(wlist + 0x10) = alloc;
+            reinterpret_cast<void (*)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)>(
+                g_addrs.weekend_structure)(wlist, cur_gsm, 0, 0, race_kind, 0, 1, 0, 0);
+            auto **svt = *reinterpret_cast<void ***>(svc);
+            if (svt && swofty::mem::readable(svt, 0x270)) {
+                reinterpret_cast<void (*)(void *, void *, int)>(svt[0x268 / 8])(svc, wlist, 1);
+            }
+        }
+
+        alignas(16) static uint8_t blk[0x190];
+        std::memset(blk, 0, sizeof(blk));
+        *reinterpret_cast<uint64_t *>(blk + 0x180) = 1;
+        reinterpret_cast<void (*)(void *, void *, void *, int)>(g_addrs.fill_entrants)(es, e, blk, 0);
+        seat_player_on_grid(e, mgr, cfg.team_id, cfg.driver_id);
+        wk = current_weekend(modes);
+        size_t n_sessions = wk ? weekend_session_count(wk) : 0;
+        ilog("[instant-race] Build pass %d: the weekend has %zu session(s)", pass, n_sessions);
+        if (n_sessions > 0) break;
+    }
 
     wk = current_weekend(modes);
     if (wk && weekend_session_count(wk) == 0) {
@@ -2431,7 +2443,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.5-layout1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5-rebuild1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2767,7 +2779,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.5-layout1 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5-rebuild1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
