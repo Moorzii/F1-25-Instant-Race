@@ -106,7 +106,7 @@ Root cause found (20 Nov, diagnostic builds with per-state link logging):
   Instant Race raised it on the first state its hook saw (e4ef00ba, a parent) and kept it set for ~3 s until
   StateFrontendWorld had no child, long enough for the parents to latch it.
 
-## 4a. Crash on loading: no track data set for the list's season (fix on `next`, test build td1)
+## 4a. Crash on loading: no track data set for the list's season (fix on `next`, test build td2)
 
 Report 23 Nov (launcher 1.10.30): two launches crashed the same way on the loading screen, null read of +0x268 at
 F1_25.exe+0x2508873, inside BuildSessionSettings (called from our wrap). `Game_TrackData_GetTrack` (1.0.145 0x2e63390)
@@ -114,10 +114,14 @@ returned 0: the query was mode 20 (swofty_f1), season 8 (season_2026, from the e
 +0xb0/+0xb1), format 0, and no `TrackDataSet` lists swofty_f1 with season_2026 (swofty_f1 is only in the f1_2023,
 f1_2024 and f1_2025 sets). So any list that names a season its setup mode has no data set for crashes, whatever the
 track; the two reports were on add-on tracks by chance. Fix: before the build, walk the track system's data sets
-(+0x68..+0x70, 0x30 rows, masks +0x20/+0x24/+0x28) like the game does; when none matches, clear the list's season used
-byte so the mode's own set is used (as for a list that names no season); refuse the launch with a toast if even that
-finds nothing. Checked again in the BuildSessionSettings wrap. td1 can force a list's season to 8 with
+(+0x68..+0x70, 0x30 rows, masks +0x20/+0x24/+0x28) like the game does; when none matches, run the list as a season
+the mode has a set for (see td2 below); refuse the launch with a toast if even that
+finds nothing. Checked again in the BuildSessionSettings wrap. The test copy can force a list's season to 8 with
 `%LOCALAPPDATA%\Swofty\instant_race_td_test.txt` to reproduce on any season.
+td1 (season left out of the query) crashed in Game_GameMode_AddTrackLayerWorlds (+0x7a143d, writing far past its
+32-row stack list): the same query picks the extra layer worlds, and with no season every season's layers matched.
+td2 instead sets the list's season to one the mode has a data set for (lowest season of the last set listing the mode
+and the default format: season_2025, stat 7, for swofty_f1).
 
 ## 4b. Track slots that don't load (suzuka24)
 `suzuka24` is listed as a track but is a spare slot the Fuji Speedway add-on (dromodf.fuji-speedway) maps into; Swofty

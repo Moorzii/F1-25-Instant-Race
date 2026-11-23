@@ -1678,9 +1678,24 @@ int track_data_set_items(const uint8_t *tracks, unsigned mode, bool season_used,
     return -1;
 }
 
+// A season the mode has track data for: the lowest season of the last data set (in row order) that lists the mode
+// and the format, i.e. the newest stock season set for that mode. -1 when no set lists the mode.
+int pick_track_data_season(const uint8_t *tracks, unsigned mode, unsigned format) {
+    const uint8_t *b = nullptr, *end = nullptr;
+    if (mode >= 32 || format >= 2 || !rd(tracks, 0x68, b) || !rd(tracks, 0x70, end) || !b || end < b) return -1;
+    int pick = -1;
+    for (const uint8_t *s = b; s < end && s < b + 0x30 * 64; s += 0x30) {
+        uint32_t m = 0, sz = 0, f = 0;
+        if (!rd(s, 0x20, m) || !rd(s, 0x24, sz) || !rd(s, 0x28, f)) break;
+        if (!((m >> mode) & 1) || !((f >> format) & 1) || !sz) continue;
+        for (int bit = 0; bit < 32; ++bit)
+            if ((sz >> bit) & 1) { pick = bit; break; }
+    }
+    return pick;
+}
+
 // Make sure the session build will find track data for this setup mode and entrant list. When the list's season has
-// no data set in this mode, leave the season out of the lookup (as for a list that names no season), so the mode's
-// own data set is used. Returns false only when even that finds nothing.
+// no data set in this mode, the list runs as a season that has one. Returns false when the mode has no data set.
 bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list) {
     void *gsm = nullptr;
     uint8_t mode = 0;
@@ -1701,15 +1716,15 @@ bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list) {
              unsigned(mode), season, season_used ? "" : " (not used)", n);
         return true;
     }
-    if (season_used) {
-        int m = track_data_set_items(tracks, mode, false, 0, 0);
-        if (m > 0) {
-            lst[0xb1] = 0;
-            ilog("[instant-race] Track data: no data set for mode %u with the list's season %u; the season is left out "
-                 "of the lookup so the mode's own data set (%d track(s)) is used instead of a crash on loading",
-                 unsigned(mode), season, m);
-            return true;
-        }
+    // Run the list as a season the mode has track data for. Leaving the season out of the query instead is not safe:
+    // the same query picks the track's extra layer worlds, and with no season every season's layers load (crash).
+    int pick = pick_track_data_season(tracks, mode, 0);
+    if (pick >= 0 && track_data_set_items(tracks, mode, true, unsigned(pick), 0) > 0) {
+        lst[0xb0] = uint8_t(pick);
+        lst[0xb1] = 1;
+        ilog("[instant-race] Track data: no data set for mode %u with the list's season %u%s; the list runs as season %d, "
+             "which has one, instead of a crash on loading", unsigned(mode), season, season_used ? "" : " (not used)", pick);
+        return true;
     }
     ilog("[instant-race] Track data: no data set for mode %u (season %u%s): launch refused", unsigned(mode), season,
          season_used ? "" : ", not used");
