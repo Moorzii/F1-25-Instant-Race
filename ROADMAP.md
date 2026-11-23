@@ -123,6 +123,19 @@ td1 (season left out of the query) crashed in Game_GameMode_AddTrackLayerWorlds 
 td2 instead sets the list's season to one the mode has a data set for (lowest season of the last set listing the mode
 and the default format: season_2025, stat 7, for swofty_f1).
 
+## 4c. Fuel too low for the race (fuel1 test)
+
+23 Nov: Short distance at Zandvoort reverse (18 laps), the engineer warned of low fuel after 4 laps; restarting the
+race gives no setup screen (race-only weekend, parc ferme). The fuel load comes from the game's own Grand Prix race
+length option (weekend_options.race_length), not from the lap count written into SessionSettings +0xdf0 after the
+build. fuel1 logs the game's own lap count next to ours and sets the race length option (found by name through
+Game_OptionsStore_FindOption / g_Game_OptionsStore, index get/set through option vtable slots 2/3) to the smallest
+percent value covering the race before the weekend is built, putting the player's value back at session end.
+
+Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
+launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
+in so player reports show it.
+
 ## 4b. Track slots that don't load (suzuka24)
 `suzuka24` is listed as a track but is a spare slot the Fuji Speedway add-on (dromodf.fuji-speedway) maps into; Swofty
 logs "/slot game/suzuka24 does not resolve in track". Picking it loaded a half-built track at 1 fps (20 Nov 03:35, no

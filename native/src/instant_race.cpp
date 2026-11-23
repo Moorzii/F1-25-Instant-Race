@@ -880,8 +880,9 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
             if (want_laps > 0 && want_laps <= 100) {
                 auto &stored = *reinterpret_cast<uint32_t *>(settings + 0xdf0);
                 uint32_t key = *reinterpret_cast<uint32_t *>(settings + 0xdf8);
+                uint32_t game_laps = stored ^ key;
                 stored = static_cast<uint32_t>(want_laps) ^ key;
-                swofty::log("[instant-race] Applied custom race length: %d laps", want_laps);
+                swofty::log("[instant-race] Applied custom race length: %d laps (the game's build had %u)", want_laps, game_laps);
             }
         }
     }
@@ -1265,6 +1266,7 @@ void choose_race_session() {
 }
 
 bool build_grand_prix_weekend(const RaceConfig &cfg);
+void apply_race_length_option(const RaceConfig &cfg);
 
 extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link) {
     if (!state || !swofty::mem::readable(state, STATE_CHILD + 8)) return link;
@@ -1752,6 +1754,7 @@ bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list) {
 
 bool build_grand_prix_weekend(const RaceConfig &cfg) {
     resolve_all_game_addrs();
+    apply_race_length_option(cfg);
 
     if (!g_addrs.game_manager || !g_addrs.set_mode || !g_addrs.mode_by_predicate || !g_addrs.gp_predicate) {
         ilog("[instant-race] Missing core game manager / mode bindings (game_manager=%p set_mode=%p mode_by_predicate=%p gp_predicate=%p)",
@@ -2275,6 +2278,120 @@ void *find_ai_difficulty_option() {
     if (!g_ai_option) { g_ai_option = opt; g_ai_saved_index = before; }
     ilog("[instant-race] AI difficulty: %d -> %d (now reads %d)", before, want, ai_get_index(opt));
 }
+// --- Race length option ----------------------------------------------------------------------------------------------
+// The car's fuel load is worked out by the game from its own Grand Prix race length option (weekend_options.race_length:
+// none, 1_laps, 3_laps, 5_laps, 25_percent, 35_percent, 50_percent, 100_percent, 10_laps, 15_laps, 20_laps, 2_laps,
+// 9_laps), not from the lap count we write into the session settings. Set that option to the share of the race we run
+// before the weekend is built, and put the player's value back when the session ends.
+void *g_len_option = nullptr;
+int g_len_saved_index = -1;
+
+std::string printable_at(const void *p, size_t max = 40) {
+    if (!p || !swofty::mem::readable(p, 1)) return {};
+    std::string out;
+    auto *c = static_cast<const char *>(p);
+    for (size_t i = 0; i < max && swofty::mem::readable(c + i, 1); ++i) {
+        char ch = c[i];
+        if (!ch) break;
+        if (ch < 0x20 || ch > 0x7e) return {};
+        out += ch;
+    }
+    return out.size() >= 2 ? out : std::string{};
+}
+
+// A value's name, if the 0x50-byte value entry holds one (a char* or an inline string near its start).
+std::string option_value_name(const uint8_t *v) {
+    for (size_t off = 0; off <= 0x20; off += 8) {
+        const void *ptr = nullptr;
+        if (rd(v, off, ptr)) {
+            std::string n = printable_at(ptr);
+            if (!n.empty()) return n;
+        }
+        std::string n = printable_at(v + off, 24);
+        if (!n.empty()) return n;
+    }
+    return {};
+}
+
+void *find_race_length_option(std::vector<std::string> *value_names) {
+    uintptr_t find = bind_name("Game_OptionsStore_FindOption");
+    uintptr_t slot = bind_name("g_Game_OptionsStore");
+    if (!find || !slot || !swofty::mem::readable(reinterpret_cast<void *>(slot), 8)) {
+        ilog("[instant-race] Race length option: options store not provided by this launcher (find=%llx store=%llx)",
+             (unsigned long long)find, (unsigned long long)slot);
+        return nullptr;
+    }
+    auto *store = *reinterpret_cast<uint8_t **>(slot);
+    if (!store || !swofty::mem::readable(store, 0x298)) return nullptr;
+    auto *base = *reinterpret_cast<uint8_t **>(store + 0x288);
+    auto *end = *reinterpret_cast<uint8_t **>(store + 0x290);
+    if (!base || end <= base) return nullptr;
+    size_t count = size_t(end - base) / 0x10;
+    using FindFn = uint64_t(void *map, const char **name);
+    for (const char *nm : {"race_length", "weekend_options.race_length", "game.weekend_options.race_length",
+                           "options.game.weekend_options.race_length", "session_length"}) {
+        const char *name = nm;
+        uint64_t idx = reinterpret_cast<FindFn *>(find)(store + 0x270, &name);
+        if (idx >= count) continue;
+        uint8_t *e = base + idx * 0x10;
+        auto *opt = swofty::mem::readable(e, 0x10) ? *reinterpret_cast<uint8_t **>(e + 8) : nullptr;
+        if (!opt || !swofty::mem::readable(opt, 0x90)) continue;
+        auto *v = *reinterpret_cast<uint8_t **>(opt + 0x80);
+        auto *ve = *reinterpret_cast<uint8_t **>(opt + 0x88);
+        size_t nvals = (v && ve > v && size_t(ve - v) % 0x50 == 0) ? size_t(ve - v) / 0x50 : 0;
+        int cur = ai_get_index(opt);
+        std::string names;
+        if (value_names) value_names->clear();
+        for (size_t i = 0; i < nvals && i < 32; ++i) {
+            std::string n = option_value_name(v + i * 0x50);
+            if (value_names) value_names->push_back(n);
+            names += (i ? "," : "") + (n.empty() ? std::string("?") : n);
+        }
+        ilog("[instant-race] Race length option: '%s' found (store index %llu, %zu values, current %d): %s", nm,
+             (unsigned long long)idx, nvals, cur, names.c_str());
+        if (cur >= 0 && nvals >= 8) return opt;
+    }
+    ilog("[instant-race] Race length option: not found by name (%zu options in the store)", count);
+    return nullptr;
+}
+
+void apply_race_length_option(const RaceConfig &cfg) {
+    std::vector<std::string> names;
+    void *opt = find_race_length_option(&names);
+    if (!opt) return;
+    // The share of the real race we run: a preset's share, or the slider's laps over the track's full distance.
+    float share = cfg.distance > 0 ? kDistances[cfg.distance].share : 0.0f;
+    if (share <= 0.0f) {
+        int full = real_race_laps(cfg.track_id);
+        if (full <= 0) full = kAddonFullLaps;
+        share = float(cfg.laps) / float(full);
+    }
+    // The smallest percent option that covers it (more fuel than needed is better than too little).
+    const char *want = share <= 0.25f + 1e-3f ? "25_percent" : share <= 0.35f + 1e-3f ? "35_percent"
+                     : share <= 0.5f + 1e-3f ? "50_percent" : "100_percent";
+    int idx = -1;
+    for (size_t i = 0; i < names.size(); ++i)
+        if (names[i] == want) idx = int(i);
+    if (idx < 0 && names.size() == 13) { // the stock order, when the value names can't be read
+        idx = std::string(want) == "25_percent" ? 4 : std::string(want) == "35_percent" ? 5
+            : std::string(want) == "50_percent" ? 6 : 7;
+    }
+    if (idx < 0) { ilog("[instant-race] Race length option: no %s value to pick", want); return; }
+    int before = ai_get_index(opt);
+    if (before == idx) { ilog("[instant-race] Race length option already %s (index %d)", want, idx); return; }
+    if (!ai_set_index(opt, idx)) { ilog("[instant-race] Race length option has no setter"); return; }
+    if (!g_len_option) { g_len_option = opt; g_len_saved_index = before; }
+    ilog("[instant-race] Race length option: %d -> %d (%s for %.0f laps; now reads %d)", before, idx, want, cfg.laps,
+         ai_get_index(opt));
+}
+void restore_race_length_option() {
+    if (!g_len_option || g_len_saved_index < 0) return;
+    ai_set_index(g_len_option, g_len_saved_index);
+    ilog("[instant-race] Race length option put back to the player's %d", g_len_saved_index);
+    g_len_option = nullptr;
+    g_len_saved_index = -1;
+}
+
 void restore_ai_difficulty() {
     if (!g_ai_option || g_ai_saved_index < 0) return;
     ai_set_index(g_ai_option, g_ai_saved_index);
@@ -2290,6 +2407,7 @@ void on_session_start(const SwoftyEvent *, void *) {
 
 void on_session_end(const SwoftyEvent *, void *) {
     restore_ai_difficulty();
+    restore_race_length_option();
     g_stage.store(static_cast<int>(LaunchStage::idle));
     g_load_sync_done = false;
     g_fade_released = false;
