@@ -131,6 +131,10 @@ length option (weekend_options.race_length), not from the lap count written into
 build. fuel1 logs the game's own lap count next to ours and sets the race length option (found by name through
 Game_OptionsStore_FindOption / g_Game_OptionsStore, index get/set through option vtable slots 2/3) to the smallest
 percent value covering the race before the weekend is built, putting the player's value back at session end.
+fuel1 result: the game's build had 5 laps (option race_length index 3 = 5_laps), but the option setter (vtable slot 3)
+did not take the index (still read 3 after the set), and lap 1 showed -10 laps of fuel. fuel2 instead sets the
+weekend's race length byte that Game_CarSetup_SessionFuelLoad reads (+0x28 of the entry in weekend +0x258..+0x260,
+same index order as the option) at build and again at StateLoadSession, and logs the list bytes to confirm the layout.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
