@@ -138,6 +138,16 @@ same index order as the option) at build and again at StateLoadSession, and logs
 fuel2 result: the byte was 3 and took 4 (the list holds a 16-byte pointer pair), but the build still had 5 laps and
 lap 1 still showed -10.37 laps of fuel, so that was not the source; removed. fuel3 wraps Game_CarSetup_SessionFuelLoad
 (guarded by resolve) and scales its result by (our laps + 2) / (game laps + 2), capped at 110 kg.
+fuel3 result: Game_CarSetup_SessionFuelLoad is not an exported binding ("bindings.steam-26566308.json does not
+list"), so the wrap was skipped; removed. Root cause found: our own weekend plan call
+(Sess_Build_DevWeekendStructure(plan, gsm, 0, 0, race, 0, 1, 0, 0)) passed race = 3, which is the race length index
+5_laps, so the game built and fuelled every race for 5 laps. fuel4 passes the smallest percent index covering the
+race (4 = 25%, 5 = 35%, 6 = 50%, 7 = 100%); the exact lap count is still written after the build.
+
+Ghost grid reproduced 23 Nov 19:46 (fuel3, Zandvoort): after Brad opened the game's Grand Prix menu, the launch logged
+"The weekend had no sessions after the build; laid out again" and every car stood at the same spot (lap 0, 4259 m,
+same x/z) at 5 s and 20 s. In the 9 earlier launches (no relayout) every grid was correct. So the ghost grid is the
+relayout path (Sess_WeekendSetup_LayoutWeekends after the season build), reached when the Grand Prix menu was visited.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
