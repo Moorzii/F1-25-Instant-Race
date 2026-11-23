@@ -2316,7 +2316,11 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
         float sw = 0, sh = 0;
         size(paint, &sw, &sh);
         rect(paint, 0, 0, sw, sh, 0x0B0D12FF);
-        Rect card{(sw - u.u(640.0f)) * 0.5f, (sh - u.u(210.0f)) * 0.5f, u.u(640.0f), u.u(210.0f)};
+        // Tracks outside the F1 25 calendar come from add-ons, and the first load of one can take several minutes
+        // (Laguna Seca about 7); say so, or it looks frozen.
+        const bool slow_track = !g_cfg.track_id.empty() && real_race_laps(g_cfg.track_id) == 0;
+        const float card_h = slow_track ? 270.0f : 210.0f;
+        Rect card{(sw - u.u(640.0f)) * 0.5f, (sh - u.u(card_h)) * 0.5f, u.u(640.0f), u.u(card_h)};
         Rect body = ui::panel(u, card, "INSTANT RACE  -  LOADING GRAND PRIX");
         char line1[256], line2[256], line3[256];
         bool hide = g_cfg.surprise;
@@ -2332,6 +2336,13 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
         ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line3, u.th.text); ly += u.u(36.0f);
         ui::label(u, {body.x, ly, body.w, u.u(24.0f)},
                   sat ? "Lining up on the grid (broadcast intro)..." : "Building custom Grand Prix weekend...", u.th.dim);
+        if (slow_track && !sat) {
+            ly += u.u(30.0f);
+            ui::label(u, {body.x, ly, body.w, u.u(24.0f)},
+                      hide ? "This one can take a few minutes to load. Leave it running."
+                           : "Add-on track: loading can take a few minutes. Leave it running.",
+                      u.th.text);
+        }
         return;
     }
 

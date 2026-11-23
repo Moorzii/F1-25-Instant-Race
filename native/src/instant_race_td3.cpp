@@ -1704,17 +1704,6 @@ bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list) {
         ilog("[instant-race] Track data check skipped (mode or list not readable)");
         return true;
     }
-    {   // td2 test only: %LOCALAPPDATA%\\Swofty\\instant_race_td_test.txt makes the list name season 8 (2026)
-        static bool forced = false;
-        char la[MAX_PATH] = {};
-        if (!forced && GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la) &&
-            GetFileAttributesA((std::string(la) + "\\Swofty\\instant_race_td_test.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
-            ilog("[instant-race] td2 test: list season %u (used %u) forced to 8 (used 1)", unsigned(lst[0xb0]), unsigned(lst[0xb1]));
-            lst[0xb0] = 8;
-            lst[0xb1] = 1;
-            forced = true;
-        }
-    }
     const unsigned season = lst[0xb0];
     const bool season_used = lst[0xb1] != 0;
     int n = track_data_set_items(tracks, mode, season_used, season, 0);
@@ -2280,7 +2269,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.5-td2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5-td3 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2327,7 +2316,11 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
         float sw = 0, sh = 0;
         size(paint, &sw, &sh);
         rect(paint, 0, 0, sw, sh, 0x0B0D12FF);
-        Rect card{(sw - u.u(640.0f)) * 0.5f, (sh - u.u(210.0f)) * 0.5f, u.u(640.0f), u.u(210.0f)};
+        // Tracks outside the F1 25 calendar come from add-ons, and the first load of one can take several minutes
+        // (Laguna Seca about 7); say so, or it looks frozen.
+        const bool slow_track = !g_cfg.track_id.empty() && real_race_laps(g_cfg.track_id) == 0;
+        const float card_h = slow_track ? 270.0f : 210.0f;
+        Rect card{(sw - u.u(640.0f)) * 0.5f, (sh - u.u(card_h)) * 0.5f, u.u(640.0f), u.u(card_h)};
         Rect body = ui::panel(u, card, "INSTANT RACE  -  LOADING GRAND PRIX");
         char line1[256], line2[256], line3[256];
         bool hide = g_cfg.surprise;
@@ -2343,6 +2336,13 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
         ui::label(u, {body.x, ly, body.w, u.u(26.0f)}, line3, u.th.text); ly += u.u(36.0f);
         ui::label(u, {body.x, ly, body.w, u.u(24.0f)},
                   sat ? "Lining up on the grid (broadcast intro)..." : "Building custom Grand Prix weekend...", u.th.dim);
+        if (slow_track && !sat) {
+            ly += u.u(30.0f);
+            ui::label(u, {body.x, ly, body.w, u.u(24.0f)},
+                      hide ? "This one can take a few minutes to load. Leave it running."
+                           : "Add-on track: loading can take a few minutes. Leave it running.",
+                      u.th.text);
+        }
         return;
     }
 
@@ -2605,7 +2605,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.5-td2 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5-td3 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
