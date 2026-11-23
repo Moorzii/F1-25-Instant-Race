@@ -135,6 +135,9 @@ fuel1 result: the game's build had 5 laps (option race_length index 3 = 5_laps),
 did not take the index (still read 3 after the set), and lap 1 showed -10 laps of fuel. fuel2 instead sets the
 weekend's race length byte that Game_CarSetup_SessionFuelLoad reads (+0x28 of the entry in weekend +0x258..+0x260,
 same index order as the option) at build and again at StateLoadSession, and logs the list bytes to confirm the layout.
+fuel2 result: the byte was 3 and took 4 (the list holds a 16-byte pointer pair), but the build still had 5 laps and
+lap 1 still showed -10.37 laps of fuel, so that was not the source; removed. fuel3 wraps Game_CarSetup_SessionFuelLoad
+(guarded by resolve) and scales its result by (our laps + 2) / (game laps + 2), capped at 110 kg.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays

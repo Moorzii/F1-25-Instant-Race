@@ -314,6 +314,9 @@ using SetModeFn = void(void *modes, void *mode);
 using BuildSettingsFn = uint64_t(void *mode, uint8_t *settings);
 
 BuildSettingsFn *orig_build_settings = nullptr;
+// The lap count the game's own build gave the race (its Grand Prix race length setting), before ours replaced it.
+std::atomic<int> g_game_laps{0};
+std::atomic<int> g_fuel_logs{0};
 using WeatherSetupFn = void(void *ws, uint8_t *settings, void *config);
 WeatherSetupFn *orig_weather_setup = nullptr;
 
@@ -881,12 +884,40 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
                 auto &stored = *reinterpret_cast<uint32_t *>(settings + 0xdf0);
                 uint32_t key = *reinterpret_cast<uint32_t *>(settings + 0xdf8);
                 uint32_t game_laps = stored ^ key;
+                g_game_laps.store(game_laps > 0 && game_laps < 1000 ? int(game_laps) : 0);
                 stored = static_cast<uint32_t>(want_laps) ^ key;
                 swofty::log("[instant-race] Applied custom race length: %d laps (the game's build had %u)", want_laps, game_laps);
             }
         }
     }
     return r;
+}
+
+// Starting fuel (Swofty RE: Game_CarSetup_SessionFuelLoad, float(setup), the session's fuel load in kg). The game
+// fuels the race for its own Grand Prix race length (often 5 laps), worked out before our lap count replaces it, so
+// the car ran dry about two thirds into a Short race. Scale the race fuel to our laps, keeping the game's margin
+// (about two laps' worth: the formation lap and spare), and stay within an F1 tank.
+using FuelLoadFn = float(void *setup);
+FuelLoadFn *orig_fuel_load = nullptr;
+float hook_fuel_load(void *setup) {
+    float r = orig_fuel_load ? orig_fuel_load(setup) : 0.0f;
+    if (g_stage.load() == static_cast<int>(LaunchStage::idle)) return r;
+    int game = g_game_laps.load();
+    int want = 0;
+    {
+        std::lock_guard lock(g_mutex);
+        want = static_cast<int>(std::lround(g_cfg.laps));
+    }
+    if (game <= 0 || want <= 0 || want == game || !(r > 0.0f) || !std::isfinite(r)) {
+        if (g_fuel_logs.fetch_add(1) < 4)
+            ilog("[instant-race] Fuel: the game loaded %.2f kg (its laps %d, ours %d): left as it is", r, game, want);
+        return r;
+    }
+    constexpr float kMargin = 2.0f, kTankKg = 110.0f;
+    float scaled = std::min(r * (float(want) + kMargin) / (float(game) + kMargin), kTankKg);
+    if (g_fuel_logs.fetch_add(1) < 4)
+        ilog("[instant-race] Fuel: the game loaded %.2f kg for %d laps; %.2f kg for our %d laps", r, game, scaled, want);
+    return scaled;
 }
 
 // Session weather (Swofty RE: Sess_GameWeatherSystem_SetupSession reads WeatherSessionSettings in rdx).
@@ -1229,55 +1260,6 @@ bool complete_load_sync(uint8_t *state) {
     return all_found;
 }
 
-// The race's starting fuel comes from the track's race_fuel row at the weekend's race length (Game_CarSetup_
-// SessionFuelLoad: a byte at +0x28 of the entry in the weekend's list +0x258..+0x260, the race length option's index:
-// none, 1_laps, 3_laps, 5_laps, 25_percent, 35_percent, 50_percent, 100_percent, 10_laps, 15_laps, 20_laps, 2_laps,
-// 9_laps). The game builds it from its own Grand Prix setting (often 5 laps), so the car was fuelled for 5 laps while
-// we race more. Set it to the smallest percent that covers our race; the lap count itself is still ours.
-constexpr size_t WK_LENGTHS = 0x258;
-constexpr size_t LENGTH_BYTE = 0x28;
-uint8_t race_length_index(const RaceConfig &cfg) {
-    float share = cfg.distance > 0 ? kDistances[cfg.distance].share : 0.0f;
-    if (share <= 0.0f) {
-        int full = real_race_laps(cfg.track_id);
-        if (full <= 0) full = kAddonFullLaps;
-        share = float(cfg.laps) / float(full);
-    }
-    return share <= 0.25f + 1e-3f ? 4 : share <= 0.35f + 1e-3f ? 5 : share <= 0.5f + 1e-3f ? 6 : 7;
-}
-void set_weekend_race_length(uint8_t *wk, const char *when) {
-    uint8_t *b = nullptr, *e = nullptr;
-    if (!wk || !rd(wk, WK_LENGTHS, b) || !rd(wk, WK_LENGTHS + 8, e) || !b || e <= b || size_t(e - b) > 0x2000 ||
-        !swofty::mem::readable(b, size_t(e - b))) {
-        ilog("[instant-race] Race length byte (%s): weekend list +0x258 not readable (%p..%p)", when, b, e);
-        return;
-    }
-    size_t bytes = size_t(e - b);
-    char hex[3 * 0x30 + 1] = {};
-    for (size_t i = 0; i < 0x30 && i < bytes; ++i) std::snprintf(hex + 3 * i, 4, "%02x ", b[i]);
-    // One entry inline (the list spans one struct) or a list of pointers to entries.
-    uint8_t *entry = nullptr;
-    void *first = nullptr;
-    if (bytes % 8 == 0 && bytes <= 0x40 && rd(b, 0, first) && first && swofty::mem::readable(first, LENGTH_BYTE + 1) &&
-        reinterpret_cast<uintptr_t>(first) > 0x10000)
-        entry = static_cast<uint8_t *>(first);
-    else if (bytes > LENGTH_BYTE)
-        entry = b;
-    uint8_t want = 0;
-    {
-        std::lock_guard lock(g_mutex);
-        want = race_length_index(g_cfg);
-    }
-    if (!entry) {
-        ilog("[instant-race] Race length byte (%s): list of %zu bytes, no entry found: %s", when, bytes, hex);
-        return;
-    }
-    uint8_t was = entry[LENGTH_BYTE];
-    ilog("[instant-race] Race length byte (%s): list of %zu bytes (%s entry), byte %u -> %u; list starts %s", when, bytes,
-         entry == b ? "inline" : "pointer", unsigned(was), unsigned(want), hex);
-    if (was <= 12) entry[LENGTH_BYTE] = want;
-}
-
 // Make the weekend's first session the Race (what direct_start.cpp's choose_session does).
 // The weekend structure itself is already built once, earlier, in build_grand_prix_weekend().
 uint8_t *current_weekend(void *modes);
@@ -1309,7 +1291,6 @@ void choose_race_session() {
             swofty::log("[instant-race] Weekend track stat id %u -> %d", unsigned(wk[0x278]), ts);
             wk[0x278] = uint8_t(ts);
         }
-        set_weekend_race_length(wk, "at load");
     } else {
         ilog("[instant-race] choose_race_session: weekend has no readable sessions");
     }
@@ -2170,7 +2151,6 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             ilog("[instant-race] Weekend session[0] id=%u (track_stat_id=%u)",
                  *reinterpret_cast<uint32_t *>(sb + SESSION_ID), unsigned(wk[WK_TRACK]));
         }
-        set_weekend_race_length(wk, "at build");
     }
 
     ilog("[instant-race] Grand Prix weekend built: era=%s, track=%s, team=%s, driver=%s, laps=%.0f",
@@ -2378,6 +2358,8 @@ void trigger_launch() {
         g_bss_idle_logged.store(0);
         g_relaid.store(false);
         g_grid_snaps = 0;
+        g_game_laps.store(0);
+        g_fuel_logs.store(0);
         ilog("[instant-race] grid: launch #%d of this game session", n);
     }
     if (g_cfg.surprise) randomize_all();
@@ -2399,7 +2381,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.5-fuel2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5-fuel3 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2700,6 +2682,16 @@ bool init_plugin() {
         }
     }
 
+    if (swofty::api->resolve("Game_CarSetup_SessionFuelLoad") != 0) {
+        swofty::detail::append(swofty::detail::mixins,
+            new swofty::detail::node{
+                {"Game_CarSetup_SessionFuelLoad", SWOFTY_MIXIN_WRAP, 0, reinterpret_cast<void *>(&hook_fuel_load),
+                 reinterpret_cast<void **>(&orig_fuel_load)},
+                nullptr});
+    } else {
+        swofty::log("[instant-race] Game_CarSetup_SessionFuelLoad is not in this Swofty Launcher: the race keeps the game's fuel load");
+    }
+
     // The flow site carries the whole launch (leaving the menu, the load sync, returning to the menu). Without it
     // Instant Race stays off; registering a mixin on a binding the launcher lacks would drop the addon.
     if (swofty::api->resolve("site_FeFlow_AfterStateLink") != 0) {
@@ -2735,7 +2727,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.5-fuel2 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5-fuel3 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
