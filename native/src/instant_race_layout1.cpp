@@ -1269,6 +1269,7 @@ void choose_race_session() {
 }
 
 bool build_grand_prix_weekend(const RaceConfig &cfg);
+void *ai_vfunc(const void *obj, size_t slot);
 
 extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link) {
     if (!state || !swofty::mem::readable(state, STATE_CHILD + 8)) return link;
@@ -2166,11 +2167,20 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         }
         if (layout && lsvc && svc_reg && svc_ent == e) {
             hand_plan("before laying out the weekend");
-            reinterpret_cast<void (*)(void *)>(layout)(lsvc);
+            // The game lays weekends out through the component's own vtable slot +0x290, whose body calls
+            // Sess_WeekendSetup_LayoutWeekends first and then does more (Swofty RE: the base WeekendSetupComponent
+            // thunk 0x140b79810 -> .data1 body). Calling LayoutWeekends alone skipped that rest; the races laid out
+            // that way had the ghost grid, the phantom first lap and fastest-lap spam. Use the slot when it is there.
+            void *full = ai_vfunc(lsvc, 0x290 / 8);
+            void **lvt = *reinterpret_cast<void ***>(lsvc);
+            ilog("[instant-race] Weekend setup component %p, vtable %p (game+0x%llx), slot +0x290 %p", (void *)lsvc,
+                 (void *)lvt, (unsigned long long)(reinterpret_cast<uintptr_t>(lvt) - 0x140000000ull), full);
+            if (full) reinterpret_cast<void (*)(void *)>(full)(lsvc);
+            else reinterpret_cast<void (*)(void *)>(layout)(lsvc);
             wk = current_weekend(modes);
             g_relaid.store(true);
-            ilog("[instant-race] The weekend had no sessions after the build; laid out again: %zu session(s)",
-                 weekend_session_count(wk));
+            ilog("[instant-race] The weekend had no sessions after the build; laid out again (%s): %zu session(s)",
+                 full ? "component slot +0x290" : "LayoutWeekends", weekend_session_count(wk));
         } else {
             ilog("[instant-race] The weekend has no sessions and could not be laid out (layout %p, service %p, entity %p)",
                  (void *)layout, lsvc, svc_ent);
@@ -2421,7 +2431,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.5-slot1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5-layout1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2757,7 +2767,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.5-slot1 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5-layout1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)

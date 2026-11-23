@@ -154,6 +154,14 @@ second, Brad deleted the Instant Race Grand Prix save slot in the Grand Prix men
 had the phantom lap (lap 2/18 at the start), fastest-lap spam, and the timing order wrong (started near the front,
 shown P17). Lead: no current Grand Prix save slot. slot1 logs the save slot manager (slots +0x268..+0x270, current
 +0x280) at each launch and grid snapshots at 5/20/45/75 s, to compare a launch with and without the slot.
+slot1 results (21:01-21:21): the save slot theory is wrong: after each delete the game makes a new current slot
+(#5 -> #6 -> #7, 'F1 25 Save 1'). What the broken launches share is the relayout path ("no sessions after the build;
+laid out again"): A relayout good, B relayout (broadcast grid screen empty, the game's build had 5 laps so the fuel was
+short at Bahrain, -6.43 laps), C no relayout good, D relayout (phantom lap: at 75 s the back-of-grid cars, which start
+before the timing line, were already on lap 1). Every launch without relayout today was good. The relayout calls
+Sess_WeekendSetup_LayoutWeekends directly; the game reaches it through the WeekendSetupComponent's vtable slot +0x290,
+whose body calls LayoutWeekends first and then does more. layout1 calls slot +0x290 instead (logging the vtable), to
+test whether the skipped rest is what sets up the grid screen, the plan's race length and the start line state.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
