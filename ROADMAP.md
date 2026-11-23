@@ -28,6 +28,11 @@ On some loads every car spawns on the start/finish line instead of its grid slot
   their races without relayout was reported bad. Brad's own ghosted runs (1.0.3, first loads) did not take this
   path, so there may be two causes. Next: find why the weekend loses its sessions on some later launches (era or track
   change doesn't explain it), and what Sess_WeekendSetup_LayoutWeekends resets besides the sessions (grid order?).
+- Second lead (bot's Send Logs bundle case-C, 22 Nov, 1.0.4): in that player's session only the first Instant Race
+  logged "Applied custom race length"; the later ones (Austria reverse with the relayout, Imola without it, Laguna
+  Seca) never reached the Game_ChampionshipGameMode_BuildSessionSettings wrap, so those races kept the previous
+  session's settings. Brad's own later races always hit the wrap. Check whether the wrap firing (or not) lines up with
+  the bad grids, and whether rebuilding the session settings ourselves on later launches fixes them.
 - Swofty 1.10.0 (20 Nov) skips the game's 3 s minimum loading screen. If the ghost grid is a timing race with the menu
   scene, it may now show up more or less often: note the launcher version with every ghosted report.
 
@@ -119,6 +124,9 @@ Option to choose where the player starts (P1 to the back), or random.
 
 ## Player reports to look at
 - **Tyre strategy and fuel (reported 20 Nov):** a player could not change their tyre strategy and their car was under-fuelled. Likely the race-only weekend / custom lap count not reaching the game's fuel and strategy setup. Need their instant_race.log, session folder, and the era/track/race length.
+- **EA version, likely fixed by 1.0.5:** the 1.0.4 byte pattern for g_Game_Manager probably found the wrong global on the
+  EA exe (mgr=0x146185008, 0 loaded entrant slots); 1.0.5 takes g_Game_Manager and everything else from the launcher's
+  EA binding set, which lists the same exports as Steam. Needs an EA player to try 1.0.5.
 - **EA version (report from 21 Nov, launcher 1.10.21):** every 1.0.4 byte pattern matched on the EA exe, but the
   launch stopped at "loaded slots in EntrantsSystem: 0" / "No loaded entrant list found" (68 lists in the DB). An
   EntrantsSystem offset or lookup probably differs on EA; Brad has no EA copy to test.
