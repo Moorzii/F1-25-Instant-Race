@@ -174,6 +174,16 @@ so it fell back to the relayout and the race was broken again (empty grid screen
 spam, lap 2/5). Reverted. Five attempts at this path have failed: next step is asking the Swofty Manager bot which
 function makes the starting grid / race start state for a new Grand Prix weekend, and what the game's own Grand Prix
 start does on a new save that Game_CustomSeason_RebuildFromRounds does not.
+Swofty bot answer (23 Nov 23:07): the starting grid is made by GridSetupComponent::setupStartingGrid
+(Game_GridSetup_SetupStartingGrid 0x141210160, helpers Game_GridSetup_DriverBasedGrid, Game_GridSetup_FindQualiResult
+"Couldn't find qualifying result for driver %s"), the championship's Game_EventListGridSetupComponent_SetupStartingGrid
+0x140b9cd70 (GridOrderOverride) which calls it, and Game_FeaturedEventModeComponent_SetupStartingGrid 0x141207300,
+whose vtable cell 0x1456c9f60 sits next to the cell holding Game_CustomSeason_RebuildFromRounds (0x1456c9f58).
+Placement: Game_VehiclePlacementSystem_HandleEncodedGridMessage, Game_Read_GridConfig, Game_GridSlot_PlaceVehicle,
+Sess_VehiclePlacement_PlaceOnSlot, per-car grid position SessionVehicleEntry +0x90 (xor, position - 1). Start state:
+Sess_PreRaceGridState_OnEnter, g_Game_RaceStartSystem, Game_ChampionshipFormationLapComponent_OnRaceStarted (not
+exported). Not known: who calls setupStartingGrid and whether it runs on a fresh save. grid2 (test only) wraps the three
+setupStartingGrid functions to log when they run, to compare a fresh-save launch with a normal one.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
