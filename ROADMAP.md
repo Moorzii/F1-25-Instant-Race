@@ -148,6 +148,12 @@ Ghost grid reproduced 23 Nov 19:46 (fuel3, Zandvoort): after Brad opened the gam
 "The weekend had no sessions after the build; laid out again" and every car stood at the same spot (lap 0, 4259 m,
 same x/z) at 5 s and 20 s. In the 9 earlier launches (no relayout) every grid was correct. So the ghost grid is the
 relayout path (Sess_WeekendSetup_LayoutWeekends after the season build), reached when the Grand Prix menu was visited.
+fuel4 (19:53, 19:55): fuel fixed (+2.62 laps, the game's build had 18). Both launches took the relayout path but the
+grid slots were right (same positions as a normal Zandvoort grid: P1 at 58-60 m past the timing line). Before the
+second, Brad deleted the Instant Race Grand Prix save slot in the Grand Prix menu (as before the ghost grid): that race
+had the phantom lap (lap 2/18 at the start), fastest-lap spam, and the timing order wrong (started near the front,
+shown P17). Lead: no current Grand Prix save slot. slot1 logs the save slot manager (slots +0x268..+0x270, current
++0x280) at each launch and grid snapshots at 5/20/45/75 s, to compare a launch with and without the slot.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays

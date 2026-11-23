@@ -1754,6 +1754,67 @@ bool ensure_track_data_set(uint8_t *e, const uint8_t *tracks, void *list) {
     return false;
 }
 
+// Diagnostics: the Grand Prix save slots (SaveSlotGameModeComponent's manager: slots at +0x268..+0x270, current at
+// +0x280; SaveSlotInfo: slot_id +0, name char* +0x20, flags +0x171 with 0x40 = instant race). Where the manager sits
+// is not pinned down, so look at the likely places and log what fits.
+bool looks_like_slot_manager(const uint8_t *m, size_t *count, const uint8_t **cur) {
+    const uint8_t *b = nullptr, *e = nullptr, *c = nullptr;
+    if (!m || !swofty::mem::readable(m, 0x288) || !rd(m, 0x268, b) || !rd(m, 0x270, e) || !rd(m, 0x280, c)) return false;
+    if ((b == nullptr) != (e == nullptr) || e < b || size_t(e - b) % 8 || size_t(e - b) / 8 > 64) return false;
+    for (const uint8_t *q = b; q && q < e; q += 8) {
+        const uint8_t *slot = nullptr;
+        if (!rd(q, 0, slot) || !slot || !swofty::mem::readable(slot, 0x190)) return false;
+        const char *nm = nullptr;
+        if (!rd(slot, 0x20, nm) || (nm && !swofty::mem::readable(nm, 1))) return false;
+    }
+    if (c && !swofty::mem::readable(c, 0x190)) return false;
+    if (!b && !c) return false;
+    *count = b ? size_t(e - b) / 8 : 0;
+    *cur = c;
+    return true;
+}
+void log_save_slots(uint8_t *ent) {
+    std::vector<std::pair<const char *, const uint8_t *>> where;
+    const uint8_t *mode = nullptr;
+    rd(ent, ENTITY_MODE, mode);
+    where.push_back({"entity+0xf08 (inline)", ent + ENTITY_MODE});
+    if (mode) where.push_back({"[entity+0xf08]", mode});
+    for (auto base : {static_cast<const uint8_t *>(ent), mode}) {
+        const uint8_t *cb = nullptr, *ce = nullptr;
+        if (base && rd(base, 0x238, cb) && rd(base, 0x240, ce) && cb && ce > cb && size_t(ce - cb) <= 0x400)
+            for (const uint8_t *q = cb; q < ce; q += 8) {
+                const uint8_t *comp = nullptr;
+                if (rd(q, 0, comp) && comp) where.push_back({base == ent ? "entity component" : "mode component", comp});
+            }
+    }
+    int found = 0;
+    for (auto &[label, m] : where) {
+        size_t n = 0;
+        const uint8_t *cur = nullptr;
+        if (!looks_like_slot_manager(m, &n, &cur)) continue;
+        ++found;
+        std::string slots;
+        const uint8_t *b = nullptr;
+        rd(m, 0x268, b);
+        for (size_t i = 0; i < n && i < 8; ++i) {
+            const uint8_t *slot = nullptr;
+            rd(b + i * 8, 0, slot);
+            uint64_t id = 0;
+            rd(slot, 0, id);
+            const char *nm = nullptr;
+            rd(slot, 0x20, nm);
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%s#%llu '%s' flags %02x%s", slots.empty() ? "" : ", ", (unsigned long long)id,
+                          nm ? std::string(nm).substr(0, 24).c_str() : "", unsigned(slot[0x171]), slot == cur ? " (current)" : "");
+            slots += buf;
+        }
+        ilog("[instant-race] save slots at %s %p: %zu slot(s), current %p: %s", label, (void *)m, n, (void *)cur,
+             slots.empty() ? "none" : slots.c_str());
+        if (found >= 3) break;
+    }
+    if (!found) ilog("[instant-race] save slots: no slot manager found near the Grand Prix entity");
+}
+
 // The race's length in the weekend plan (Sess_Build_DevWeekendStructure's race argument): the index of the Grand Prix
 // race length values none, 1_laps, 3_laps, 5_laps, 25_percent, 35_percent, 50_percent, 100_percent, 10_laps, 15_laps,
 // 20_laps, 2_laps, 9_laps. The game builds the race from it, its lap count and its starting fuel too, so it has to
@@ -2130,6 +2191,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         }
     }
 
+    log_save_slots(e);
     ilog("[instant-race] Grand Prix weekend built: era=%s, track=%s, team=%s, driver=%s, laps=%.0f",
          cfg.era_id.c_str(), cfg.track_id.c_str(), cfg.team_id.c_str(), cfg.driver_id.c_str(), cfg.laps);
     return true;
@@ -2161,7 +2223,8 @@ void log_grid_snapshot(int which) {
         }
     }
     ilog("[instant-race] grid: snapshot %d (%u s after the session went live): type %u, %u car(s), %u racer(s), "
-         "player vehicle %d, %zu in order, %d within 3 m of another car", which, which == 1 ? 5u : 20u, ses->type,
+         "player vehicle %d, %zu in order, %d within 3 m of another car", which,
+         which == 1 ? 5u : which == 2 ? 20u : which == 3 ? 45u : 75u, ses->type,
          ses->cars, ses->racers, ses->player, cars.size(), stacked);
     std::string line;
     for (size_t i = 0; i < cars.size(); ++i) {
@@ -2187,7 +2250,8 @@ void on_flow_frame(double, void *) {
     }
     {   // Grid snapshots 5 s and 20 s after an Instant Race session goes live.
         uint64_t at = g_session_at_ms.load();
-        if (at && g_launch_no.load() > 0 && g_grid_snaps < 2 && GetTickCount64() - at >= (g_grid_snaps ? 20000u : 5000u)) {
+        static const uint64_t kSnapAt[] = {5000, 20000, 45000, 75000};
+        if (at && g_launch_no.load() > 0 && g_grid_snaps < 4 && GetTickCount64() - at >= kSnapAt[g_grid_snaps]) {
             ++g_grid_snaps;
             log_grid_snapshot(g_grid_snaps);
         }
@@ -2357,7 +2421,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.5-fuel4 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.5-slot1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2693,7 +2757,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.5-fuel4 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.5-slot1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
