@@ -1819,13 +1819,21 @@ void log_save_slots(uint8_t *ent) {
 // race length values none, 1_laps, 3_laps, 5_laps, 25_percent, 35_percent, 50_percent, 100_percent, 10_laps, 15_laps,
 // 20_laps, 2_laps, 9_laps. The game builds the race from it, its lap count and its starting fuel too, so it has to
 // cover the race: a fixed 3 (5 laps) fuelled every car for 5 laps whatever we raced. The smallest percent that covers
-// our laps; the exact lap count is still written after the build.
+// our laps; the exact lap count is still written after the build. A race shorter than 25% takes the smallest lap-count
+// value that covers it instead: the 25% value also brings the 25% race rules (the compulsory pit stop with two dry
+// compounds), which the game never asks of a 5-lap race.
 uint64_t weekend_race_length(const RaceConfig &cfg) {
     float share = cfg.distance > 0 ? kDistances[cfg.distance].share : 0.0f;
     if (share <= 0.0f) {
         int full = real_race_laps(cfg.track_id);
         if (full <= 0) full = kAddonFullLaps;
         share = float(cfg.laps) / float(full);
+    }
+    if (share < 0.25f - 1e-3f && cfg.laps > 0) {
+        // Only the lap values the game's race rule tables have rows for (3, 5, 10 and 15 laps).
+        static const std::pair<int, uint64_t> kLapLengths[] = {{3, 2}, {5, 3}, {10, 8}, {15, 9}};
+        for (const auto &[laps, value] : kLapLengths)
+            if (cfg.laps <= laps) return value;
     }
     return share <= 0.25f + 1e-3f ? 4 : share <= 0.35f + 1e-3f ? 5 : share <= 0.5f + 1e-3f ? 6 : 7;
 }
@@ -2125,8 +2133,10 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         ? registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)
         : nullptr;
     uint64_t race_kind = race_length;
+    static const char *const kRaceLengthNames[] = {"none", "1 lap", "3 laps", "5 laps", "25%", "35%", "50%",
+                                                   "100%", "10 laps", "15 laps", "20 laps", "2 laps", "9 laps"};
     ilog("[instant-race] Weekend race length = %llu (%s)", (unsigned long long)race_kind,
-         race_kind == 4 ? "25%" : race_kind == 5 ? "35%" : race_kind == 6 ? "50%" : "100%");
+         race_kind < std::size(kRaceLengthNames) ? kRaceLengthNames[race_kind] : "?");
     if (!(alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8))) {
         ilog("[instant-race] Weekend structure NOT built (alloc=%p gsm=%p svc=%p fn=%p)", alloc, cur_gsm, svc,
              (void *)g_addrs.weekend_structure);

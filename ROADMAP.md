@@ -268,6 +268,12 @@ language either.
 - **Crash attributed to Instant Race (report-05, 21 Nov):** access violation at F1_25.exe+0xaf76f1 inside the game's
   own Game_ChampionshipGameMode_BuildSessionSettings during a normal Grand Prix; Instant Race's wrap was only passing
   through (no launch that session), but crash reports name instant_race.dll because the wrap is on the stack.
+- **Short races now ask for a pit stop (Racingfox2309, 24 Nov, 1.0.6):** "the game doesn't detect 5 lappers anymore, I
+  have to make a pit stop". 1.0.6's fuel fix sends 25% as the weekend race length for anything up to 25%, and 25% brings
+  the 25% race rules (compulsory stop with two dry compounds; game setup mode tyre_regulations.race0_length_requirement).
+  1.0.5 and earlier always sent 5_laps, which has no compulsory stop. Fixed in `next` (not yet tested in game): a race
+  under 25% takes the smallest of 3, 5, 10 or 15 laps that covers it (the lap values the game's race rule tables have
+  rows for); the log names the value.
 - **Same crash a third time (Racingfox2309, 24 Nov 08:01, 1.0.6):** f1_2025, Hungaroring, Surprise, 70 laps. Track data
   matched (season 7, 49 tracks), race length 7, weather and start time set; then the null virtual call at
   F1_25.exe+0x2cf07f2 (fn base+0x2cee9c0, `mov rax,[rcx]` with rcx 0) as flow #7c8bb060 (the Race flow state, per
