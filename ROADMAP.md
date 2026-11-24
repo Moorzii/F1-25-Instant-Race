@@ -218,7 +218,15 @@ session live, clean grid (20 in order, none within 3 m), no freeze on exit. That
 NEXT: the bad case with gp2: restart the game with no Grand Prix save, F7 straight away, and read +0x538. If it is 0,
 start the season (or have the game do it) after RebuildFromRounds creates it.
 
-Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
+gp3 (24 Nov 21:52-22:13, launcher 1.10.43): game restarted, F7 straight away, no Grand Prix menu: the weekend already had
+1 session before our build (the game never laid one out this session, so it came from the save), season +0x538 = 1, no
+relayout, both launches good. The weekend the game's own Grand Prix start sets up lives in the profile save and
+survives deleting the Grand Prix slot (except in the gp1 run, where it was null after the delete; not understood).
+Brad's profile can no longer show the bug, so the fix cannot be tested here. Short race fix confirmed: Custom 5 laps
+gave race length 3 (5 laps), the game's build had 5, fuel fine, no compulsory stop (Brad drove the 5 laps).
+Correction: Racingfox's +0x2cf07f2 crashes are NOT this bug. His 1.0.6 crash (and the first 1.0.4 one) took no
+relayout: the weekend had its session. Cause unknown; ask the Swofty bot about fn 0x142cee9c0.
+ 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
 in so player reports show it.
 
@@ -288,9 +296,8 @@ language either.
   F1_25.exe+0x2cf07f2 (fn base+0x2cee9c0, `mov rax,[rcx]` with rcx 0) as flow #7c8bb060 (the Race flow state, per
   Swofty's session notes) entered, 14 s after StateLoadSession and before the session went live. Launch #1 of the game
   session again. All three cases: the first Instant Race of a game session, at the Race flow entry, and on 22 Nov it did
-  not repeat after a normal Grand Prix. That is the first-race-on-fresh-save pattern (Brad gets the broken grid and empty
-  Starting Grid screen; this player's setup crashes when the race flow opens). Expect the 1.0.7 fix to cover it; check
-  with this player afterwards. The bot's 23 Nov pair (1.0.5, reading 0x268) is the track data crash fixed in 1.0.6.
+  not repeat after a normal Grand Prix. I first took this for the first-race bug, but none of these launches took the relayout path (see gp3),
+  so the cause is still unknown. The bot's 23 Nov pair (1.0.5, reading 0x268) is the track data crash fixed in 1.0.6.
 - **Crash while loading (Racingfox2309, 1.0.3):** 2026 season, Silverstone reverse layout, Toro Rosso. Null call at F1_25.exe+0x2cf07f2, 16 s into loading, no Instant Race frame on the stack, not repeated (their 2024 Zandvoort and 2019 Hockenheim races loaded and finished). Check whether the reverse layout or the 2026 grid is involved.
 - **Aston Martin seated at "Force India" (same player): not a bug.** Swofty's 2021+ grids keep Aston Martin in the
   Force India slot (sw24_force_india is the 2024 Aston Martin: Stroll/Alonso; the 2024 grid has no other candidate).
