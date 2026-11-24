@@ -20,11 +20,10 @@ Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's ow
 
 ## Known limitations
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
-- **Instant Race needs one normal Grand Prix on your save first.** On a Grand Prix save the game has never set a race
-  up on (a new profile, or after deleting your Grand Prix save), Instant Race starts oddly: an empty Starting Grid
-  screen, cars inside each other or in the wrong order, a lap counted at the start, "fastest lap" messages, and the
-  game can freeze on the way back to the menu. Fix: start one normal Grand Prix from the game's Grand Prix menu, get
-  to the grid, then quit. Instant Race works from then on, also after restarting the game. A fix is planned for 1.0.7.
+- **Instant Race needs one normal Grand Prix on your save first.** On a profile where the game has never set up a
+  Grand Prix race itself (for example a new profile), Instant Race can't build a working race, so it stops and tells
+  you: start one normal Grand Prix from the game's Grand Prix menu, get to the grid, then quit. Instant Race works from
+  then on, also after restarting the game.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
 - Add-on tracks can take several minutes to load (Laguna Seca about 7); the loading card says so. Leave it running.
@@ -32,6 +31,14 @@ Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's ow
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
+**1.0.7**
+- **Short races:** races shorter than a quarter of the real distance (a 5-lap race, say) no longer ask for a compulsory
+  pit stop. Since 1.0.6 the game treated every race up to 25% as a 25% race, with its two-compound pit stop rule. Fuel
+  still covers the full race.
+- **No more broken first race:** on a profile that has never started a normal Grand Prix, Instant Race used to start
+  a broken race (empty Starting Grid screen, cars inside each other, a lap counted at the start, a freeze when
+  quitting). It now stops before loading and tells you to start one normal Grand Prix first.
+
 **1.0.6**
 - **Fuel fixed:** every car (yours and the AI's) was fuelled for a 5-lap race whatever distance you picked, so longer
   races ran short of fuel after a few laps. The game now fuels the race for the distance you chose.
