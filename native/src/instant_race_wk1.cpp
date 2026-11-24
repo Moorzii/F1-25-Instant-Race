@@ -1466,6 +1466,30 @@ size_t weekend_session_count(uint8_t *wk) {
     return size_t(en - b) / 0xa0;
 }
 
+// wk1 test: dump the weekend (0x2a0 bytes) and its first session entry (0xa0 bytes) to compare a weekend the game
+// kept (good grid) with one that came back empty and was laid out again (no grid).
+void dump_bytes(const char *what, const uint8_t *p, size_t n) {
+    if (!p || !swofty::mem::readable(p, n)) {
+        ilog("[instant-race] wk1: %s %p not readable", what, (const void *)p);
+        return;
+    }
+    for (size_t off = 0; off < n; off += 0x20) {
+        char line[200];
+        int k = std::snprintf(line, sizeof line, "[instant-race] wk1: %s +%03zx:", what, off);
+        for (size_t i = off; i < off + 0x20 && i < n; i += 8)
+            k += std::snprintf(line + k, sizeof line - k, " %016llx",
+                               (unsigned long long)*reinterpret_cast<const uint64_t *>(p + i));
+        ilog("%s", line);
+    }
+}
+void dump_weekend(const char *when, uint8_t *wk) {
+    ilog("[instant-race] wk1: weekend %p %s, %zu session(s)", (void *)wk, when, wk ? weekend_session_count(wk) : 0);
+    if (!wk) return;
+    dump_bytes("weekend", wk, 0x2a0);
+    uint8_t *sb = nullptr;
+    if (weekend_session_count(wk) && rd(wk, WK_SESSIONS, sb) && sb) dump_bytes("session0", sb, 0xa0);
+}
+
 void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, const std::string &want_driver) {
     auto **begin = reinterpret_cast<uint8_t **>(e + ENTITY_ENTRANTS);
     if (!begin[0] || !begin[1] || begin[1] <= begin[0]) return;
@@ -2099,8 +2123,10 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             ilog("[instant-race] Session plan NOT handed over %s (alloc=%p gsm=%p svc=%p)", when, p_alloc, p_gsm, p_svc);
         }
     };
+    dump_weekend("before the season build", current_weekend(modes));
     hand_plan("before the season build");
     reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
+    dump_weekend("after the season build", current_weekend(modes));
     {
         uint8_t *gp_mode = nullptr, *cur_mode = nullptr;
         rd(e, ENTITY_MODE, gp_mode);
@@ -2150,6 +2176,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     seat_player_on_grid(e, mgr, cfg.team_id, cfg.driver_id);
 
     wk = current_weekend(modes);
+    dump_weekend("after the entrants", wk);
     if (wk && weekend_session_count(wk) == 0) {
         // A Grand Prix weekend already in the mode that was never played (a profile with no Grand Prix played) is
         // reset by the season build: its sessions are cleared and nothing lays them out again, so the race would
@@ -2176,6 +2203,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
                  (void *)layout, lsvc, svc_ent);
         }
     }
+    if (g_relaid.load()) dump_weekend("after laying it out again", wk);
     if (!wk) ilog("[instant-race] current weekend not readable after entrants (will retry at load)");
     if (wk && swofty::mem::readable(wk, WK_TRACK + 4)) {
         wk[WK_TRACK] = track[1];
@@ -2421,7 +2449,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.6-grid2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.6-wk1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2707,36 +2735,6 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     ui::draw_toasts(u);
 }
 
-// grid2 test only: log when the game's starting grid setups run (Swofty RE, binding ids from the Swofty bot). Pass-through
-// wraps with four register arguments: setupStartingGrid takes (this) or (this, StartingGrid&).
-using Pass4Fn = uint64_t(uint64_t, uint64_t, uint64_t, uint64_t);
-struct GridProbe {
-    const char *name;
-    Pass4Fn *orig;
-    std::atomic<int> calls;
-};
-GridProbe g_grid_probes[3] = {{"Game_GridSetup_SetupStartingGrid", nullptr, {0}},
-                              {"Game_EventListGridSetupComponent_SetupStartingGrid", nullptr, {0}},
-                              {"Game_FeaturedEventModeComponent_SetupStartingGrid", nullptr, {0}}};
-template <int I> uint64_t grid_probe_hook(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
-    int n = ++g_grid_probes[I].calls;
-    if (n <= 30)
-        ilog("[instant-race] grid2: %s called (#%d, launch #%d, stage %d, this %p, arg %p)", g_grid_probes[I].name, n,
-             g_launch_no.load(), g_stage.load(), (void *)a, (void *)b);
-    return g_grid_probes[I].orig ? g_grid_probes[I].orig(a, b, c, d) : 0;
-}
-template <int I> void register_grid_probe() {
-    if (swofty::api->resolve(g_grid_probes[I].name) == 0) {
-        swofty::log("[instant-race] grid2: %s is not an exported binding", g_grid_probes[I].name);
-        return;
-    }
-    swofty::detail::append(swofty::detail::mixins,
-        new swofty::detail::node{{g_grid_probes[I].name, SWOFTY_MIXIN_WRAP, 0, reinterpret_cast<void *>(&grid_probe_hook<I>),
-                                  reinterpret_cast<void **>(&g_grid_probes[I].orig)},
-                                 nullptr});
-    swofty::log("[instant-race] grid2: watching %s", g_grid_probes[I].name);
-}
-
 bool init_plugin() {
     if (!swofty::api || !swofty::api->resolve) return true;
 
@@ -2775,10 +2773,6 @@ bool init_plugin() {
                 nullptr});
     }
 
-    register_grid_probe<0>();
-    register_grid_probe<1>();
-    register_grid_probe<2>();
-
     return true;
 }
 
@@ -2791,7 +2785,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.6-grid2 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.6-wk1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)

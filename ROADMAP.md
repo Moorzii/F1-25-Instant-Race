@@ -184,6 +184,15 @@ Sess_VehiclePlacement_PlaceOnSlot, per-car grid position SessionVehicleEntry +0x
 Sess_PreRaceGridState_OnEnter, g_Game_RaceStartSystem, Game_ChampionshipFormationLapComponent_OnRaceStarted (not
 exported). Not known: who calls setupStartingGrid and whether it runs on a fresh save. grid2 (test only) wraps the three
 setupStartingGrid functions to log when they run, to compare a fresh-save launch with a normal one.
+grid2 results (24 Nov 00:05, 00:19): the first launch after starting the game took the relayout path twice without
+deleting the save (slot #5 kept); both were broken (all cars on one spot, red flag), and quitting to the menu froze in
+StateUnloadSession (stall report: the loader at state 5, Sess_Module_OnSessionUnloaded) until the game was ended.
+Game_GridSetup_SetupStartingGrid did run in the broken launch (inside BuildSessionSettings, this = a component next to the
+save slot one); the EventList / FeaturedEvent setups did not. Both 2011 launches raced 18 of 24 entrants. The game DB
+says swofty_f1's race group grid_type is "qualifying" and grid_type_no_qualifying "weightedRandom" (a normal launch shows
+a shuffled grid). So the 1.0.6 workaround ("quit and launch again") is wrong when the quit freezes. wk1 dumps the
+weekend (0x2a0 bytes) and its first session entry (0xa0) before and after the season build, after the entrants and
+after a relayout, to diff a kept weekend with a laid-out one.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
