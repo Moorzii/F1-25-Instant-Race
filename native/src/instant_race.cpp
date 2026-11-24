@@ -857,13 +857,22 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
     uint64_t r = orig_build_settings ? orig_build_settings(mode, settings) : 0;
     int st = g_stage.load();
     {
-        uint32_t sid0 = settings && swofty::mem::readable(settings, 8) ? *reinterpret_cast<uint32_t *>(settings + 4) : 0xffffffffu;
+        // SessionSettings +0 (u8) is the ruleset and +4 (u32) the session id. The game's create-session function
+        // (Swofty bot, 24 Nov) picks flow_race.xml for ids 15..17 and then makes the race's mode object only for
+        // rulesets 1 and 4..15; with 0, 2 (Time Trial's), 0x10 or above it makes none and the game crashes as the
+        // Race flow starts (F1_25.exe+0x2cf07f2). Log it on every build to see what a normal Grand Prix writes.
+        const bool rd8 = settings && swofty::mem::readable(settings, 8);
+        uint32_t sid0 = rd8 ? *reinterpret_cast<uint32_t *>(settings + 4) : 0xffffffffu;
+        unsigned rs0 = rd8 ? settings[0] : 0xffu;
         if (st != static_cast<int>(LaunchStage::idle)) {
             int n = ++g_bss_calls;
             if (sid0 >= 15 && sid0 <= 17) ++g_bss_race;
-            ilog("[instant-race] grid: BuildSessionSettings #%d of launch #%d (session id %u)", n, g_launch_no.load(), sid0);
-        } else if (g_launch_no.load() > 0 && g_bss_idle_logged.fetch_add(1) < 12) {
-            ilog("[instant-race] grid: BuildSessionSettings while no launch is running (session id %u)", sid0);
+            ilog("[instant-race] grid: BuildSessionSettings #%d of launch #%d (session id %u, ruleset %u)", n,
+                 g_launch_no.load(), sid0, rs0);
+            if (sid0 >= 15 && sid0 <= 17 && !(rs0 == 1 || (rs0 >= 4 && rs0 <= 15)))
+                ilog("[instant-race] WARNING: race session with ruleset %u, which the game makes no race mode for", rs0);
+        } else if (g_bss_idle_logged.fetch_add(1) < 12) {
+            ilog("[instant-race] grid: BuildSessionSettings while no launch is running (session id %u, ruleset %u)", sid0, rs0);
         }
     }
     if (st != static_cast<int>(LaunchStage::idle) && settings && swofty::mem::readable(settings, 0xe00)) {

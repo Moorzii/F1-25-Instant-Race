@@ -301,6 +301,13 @@ language either.
   none of its branches (inferred), or the allocation failed. 4 reports at this site, all with Instant Race on, 0
   without. Next: ask which settings field feeds [[this+0x220]+0x1a8] and its valid values, then log it in our
   BuildSessionSettings wrap on every launch (and correct it if it is out of range).
+- **Bot follow-up (24 Nov 22:28):** [this+0x220] is the game-state object; [[state+0x1a8]] is the SessionSettings
+  (u8 ruleset at +0, u32 session id at +4, the same fields BuildSessionSettings writes; same instance inferred). Create
+  session: ids 15..17 -> flow_race.xml, then the mode object is made only for rulesets 1 and 4..15; 0, 2 and >= 0x11
+  make none (0x10 flow_dev also none, 3 a dev object). Time Trial writes ruleset 2, so a stale 2 or 0 fits (inferred).
+  All 4 reports are Racingfox's. `next` now logs the ruleset on every BuildSessionSettings and warns on a race session
+  with a ruleset that gets no mode; rs1 tests it (normal Grand Prix race, Time Trial, then Instant Race). Once the
+  stock Grand Prix value is known, correct a bad one in the wrap.
 - **Short races now ask for a pit stop (Racingfox2309, 24 Nov, 1.0.6):** "the game doesn't detect 5 lappers anymore, I
   have to make a pit stop". 1.0.6's fuel fix sends 25% as the weekend race length for anything up to 25%, and 25% brings
   the 25% race rules (compulsory stop with two dry compounds; game setup mode tyre_regulations.race0_length_requirement).
