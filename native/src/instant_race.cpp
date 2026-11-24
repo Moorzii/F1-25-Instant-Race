@@ -1889,6 +1889,25 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         return false;
     }
 
+    // A profile whose Grand Prix weekend the game's own Grand Prix start has never set up has no weekend (or one with
+    // no sessions) here. Every race built on it was broken: the grid in vehicle order or every car on one spot, an
+    // empty Starting Grid screen, a phantom first lap and a freeze when quitting. Check before changing anything:
+    // stopping after the season build leaves the Grand Prix mode half built, and the game's own next Grand Prix then
+    // freezes on quitting too. The game keeps the weekend in the profile save once a normal Grand Prix has started.
+    {
+        uint8_t *wk0 = current_weekend(modes);
+        const size_t n0 = wk0 ? weekend_session_count(wk0) : 0;
+        if (!wk0 || n0 == 0) {
+            ilog("[instant-race] No Grand Prix weekend set up on this profile yet (weekend %p, %zu session(s)): launch "
+                 "stopped before any change; the player is asked to start one normal Grand Prix first.", (void *)wk0, n0);
+            swofty::overlay::ui::toast(g_ui_state, "First time? Start one normal Grand Prix from the game's menu, get to "
+                                                   "the grid, then quit. Instant Race works from then on.");
+            g_stage.store(static_cast<int>(LaunchStage::idle));
+            return false;
+        }
+        ilog("[instant-race] Grand Prix weekend on this profile: %zu session(s) before the build", n0);
+    }
+
     uint8_t *es = *reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(mgr) + MANAGER_ENTRANTS);
     auto *lists = *reinterpret_cast<uint8_t **>(es + ES_LISTS);
     auto *lists_end = *reinterpret_cast<uint8_t **>(es + ES_LISTS + 8);
@@ -2161,18 +2180,30 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
 
     wk = current_weekend(modes);
     if (wk && weekend_session_count(wk) == 0) {
-        // The season build left the weekend with no sessions. This happens on a profile whose Grand Prix weekend the
-        // game's own Grand Prix start has never set up (the game keeps that weekend in the profile save from then on).
-        // Every race launched from here was broken: the grid in vehicle order or every car on one spot, an empty
-        // Starting Grid screen, a phantom first lap, and a freeze when quitting. Laying the weekend out again
-        // (Sess_WeekendSetup_LayoutWeekends) gives it a session but not a starting grid. So stop here and tell the
-        // player how to set the profile up: one normal Grand Prix start, then Instant Race works from then on.
-        ilog("[instant-race] The weekend has no sessions after the build: this profile has never started a normal Grand "
-             "Prix. Launch stopped; the player is asked to start one normal Grand Prix first.");
-        swofty::overlay::ui::toast(g_ui_state, "First time? Start one normal Grand Prix from the game's menu, get to the "
-                                               "grid, then quit. Instant Race works from then on.");
-        g_stage.store(static_cast<int>(LaunchStage::idle));
-        return false;
+        // A Grand Prix weekend already in the mode that was never played (a profile with no Grand Prix played) is
+        // reset by the season build: its sessions are cleared and nothing lays them out again, so the race would
+        // have no session (phantom first lap, fastest-lap spam). Lay the season's weekends out from the weekend
+        // service's plan, as the game's weekend setup does (Sess_WeekendSetup_LayoutWeekends).
+        static uintptr_t layout = 0;
+        if (!layout) layout = bind_name("Sess_WeekendSetup_LayoutWeekends");
+        uint8_t *lsvc = g_addrs.weekend_service
+            ? static_cast<uint8_t *>(registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)) : nullptr;
+        void *svc_reg = nullptr, *svc_ent = nullptr;
+        if (lsvc) {
+            rd(lsvc, 0x270, svc_reg);
+            rd(lsvc, 0x278, svc_ent);
+        }
+        if (layout && lsvc && svc_reg && svc_ent == e) {
+            hand_plan("before laying out the weekend");
+            reinterpret_cast<void (*)(void *)>(layout)(lsvc);
+            wk = current_weekend(modes);
+            g_relaid.store(true);
+            ilog("[instant-race] The weekend had no sessions after the build; laid out again: %zu session(s)",
+                 weekend_session_count(wk));
+        } else {
+            ilog("[instant-race] The weekend has no sessions and could not be laid out (layout %p, service %p, entity %p)",
+                 (void *)layout, lsvc, svc_ent);
+        }
     }
     if (!wk) ilog("[instant-race] current weekend not readable after entrants (will retry at load)");
     if (wk && swofty::mem::readable(wk, WK_TRACK + 4)) {
