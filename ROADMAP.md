@@ -268,6 +268,14 @@ language either.
 - **Crash attributed to Instant Race (report-05, 21 Nov):** access violation at F1_25.exe+0xaf76f1 inside the game's
   own Game_ChampionshipGameMode_BuildSessionSettings during a normal Grand Prix; Instant Race's wrap was only passing
   through (no launch that session), but crash reports name instant_race.dll because the wrap is on the stack.
+- **Same crash a third time (Racingfox2309, 24 Nov 08:01, 1.0.6):** f1_2025, Hungaroring, Surprise, 70 laps. Track data
+  matched (season 7, 49 tracks), race length 7, weather and start time set; then the null virtual call at
+  F1_25.exe+0x2cf07f2 (fn base+0x2cee9c0, `mov rax,[rcx]` with rcx 0) as flow #7c8bb060 (the Race flow state, per
+  Swofty's session notes) entered, 14 s after StateLoadSession and before the session went live. Launch #1 of the game
+  session again. All three cases: the first Instant Race of a game session, at the Race flow entry, and on 22 Nov it did
+  not repeat after a normal Grand Prix. That is the first-race-on-fresh-save pattern (Brad gets the broken grid and empty
+  Starting Grid screen; this player's setup crashes when the race flow opens). Expect the 1.0.7 fix to cover it; check
+  with this player afterwards. The bot's 23 Nov pair (1.0.5, reading 0x268) is the track data crash fixed in 1.0.6.
 - **Crash while loading (Racingfox2309, 1.0.3):** 2026 season, Silverstone reverse layout, Toro Rosso. Null call at F1_25.exe+0x2cf07f2, 16 s into loading, no Instant Race frame on the stack, not repeated (their 2024 Zandvoort and 2019 Hockenheim races loaded and finished). Check whether the reverse layout or the 2026 grid is involved.
 - **Aston Martin seated at "Force India" (same player): not a bug.** Swofty's 2021+ grids keep Aston Martin in the
   Force India slot (sw24_force_india is the 2024 Aston Martin: Stroll/Alonso; the 2024 grid has no other candidate).
