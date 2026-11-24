@@ -313,6 +313,11 @@ language either.
   cause) appears later or in another copy. 1.0.7: a bad ruleset is set to 1 at the build, and the settings are watched
   every frame until the session is live and set back to 1 if they change. Not proven to fix his crash; his next log
   says ("Race session ruleset changed to ...").
+- **2011 grid: 18 racers and a freeze on quitting (24 Nov 23:42, 1.0.7 release build):** f1cg_f1_2011 at Catalunya,
+  25 cars but 18 racers, clean grid, ruleset 1; quitting froze in StateUnloadSession (stall: loader state 5,
+  Sess_Module_OnSessionUnloaded). Same as grid2's two 2011 launches (18 of 24 racers, freeze) and the normal Grand Prix
+  Brad started in the rc1 test, which had a 2011 grid and froze on quitting twice without Instant Race in it. So the
+  2011 season freezes on quitting in a normal Grand Prix too: not an Instant Race bug. Asked the Swofty bot.
 - **Short races now ask for a pit stop (Racingfox2309, 24 Nov, 1.0.6):** "the game doesn't detect 5 lappers anymore, I
   have to make a pit stop". 1.0.6's fuel fix sends 25% as the weekend race length for anything up to 25%, and 25% brings
   the 25% race rules (compulsory stop with two dry compounds; game setup mode tyre_regulations.race0_length_requirement).
