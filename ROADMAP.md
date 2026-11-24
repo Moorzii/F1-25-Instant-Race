@@ -211,6 +211,12 @@ order and the phantom lap comes at 45 s. So the weekend is not the difference: t
 creates from nothing is never started (Game_Season_Start: season +0x538 0 NotStarted -> 1 InProgress, plus lists).
 gp2 logs the season's +0x538 at our build and at session live, and wraps Game_Season_Start and
 Game_CustomSeason_RefreshFromSetup to see what the game's Grand Prix start calls.
+gp2 run 1 (24 Nov 01:28-01:38): Game_Season_Start and Game_CustomSeason_RefreshFromSetup are not exported bindings, so
+only the +0x538 log works. Brad ran a normal Grand Prix, deleted the save, then F7 in the same game session: the game's
+season and weekend were still in memory (weekend 1 session before our build), season +0x538 = 1 at our build and at
+session live, clean grid (20 in order, none within 3 m), no freeze on exit. That is the good case.
+NEXT: the bad case with gp2: restart the game with no Grand Prix save, F7 straight away, and read +0x538. If it is 0,
+start the season (or have the game do it) after RebuildFromRounds creates it.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
