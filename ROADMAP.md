@@ -308,6 +308,11 @@ language either.
   All 4 reports are Racingfox's. `next` now logs the ruleset on every BuildSessionSettings and warns on a race session
   with a ruleset that gets no mode; rs1 tests it (normal Grand Prix race, Time Trial, then Instant Race). Once the
   stock Grand Prix value is known, correct a bad one in the wrap.
+- **rs1 (24 Nov 23:14-23:26):** a normal Grand Prix race wrote ruleset 1; Time Trial then Instant Race also got 1 at
+  our BuildSessionSettings (no crash). So the build itself writes a good value; Racingfox's bad value (if that is the
+  cause) appears later or in another copy. 1.0.7: a bad ruleset is set to 1 at the build, and the settings are watched
+  every frame until the session is live and set back to 1 if they change. Not proven to fix his crash; his next log
+  says ("Race session ruleset changed to ...").
 - **Short races now ask for a pit stop (Racingfox2309, 24 Nov, 1.0.6):** "the game doesn't detect 5 lappers anymore, I
   have to make a pit stop". 1.0.6's fuel fix sends 25% as the weekend race length for anything up to 25%, and 25% brings
   the 25% race rules (compulsory stop with two dry compounds; game setup mode tyre_regulations.race0_length_requirement).

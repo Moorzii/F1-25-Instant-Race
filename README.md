@@ -38,6 +38,8 @@ Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's ow
 - **No more broken first race:** on a profile that has never started a normal Grand Prix, Instant Race used to start
   a broken race (empty Starting Grid screen, cars inside each other, a lap counted at the start, a freeze when
   quitting). It now checks first and, before changing anything, tells you to start one normal Grand Prix first.
+- **Crash as the race starts:** guards against a crash a player hit on their first Instant Race after opening the game,
+  about 15 seconds into loading. Instant Race now checks the race's rule set while it loads and keeps it valid.
 
 **1.0.6**
 - **Fuel fixed:** every car (yours and the AI's) was fuelled for a 5-lap race whatever distance you picked, so longer

@@ -304,6 +304,12 @@ bool g_raced_once = false; // an Instant Race has run in this game session (log 
 // out again, and where the cars stand once the session is live.
 std::atomic<int> g_launch_no{0};
 std::atomic<int> g_bss_calls{0}, g_bss_race{0}, g_bss_idle_logged{0};
+// The race's SessionSettings from our launch's BuildSessionSettings, watched until the session goes live (ruleset check).
+std::atomic<uint8_t *> g_race_settings{nullptr};
+// SessionSettings +0 is the ruleset. The game makes the race's mode object only for rulesets 1 and 4..15 (Swofty bot,
+// 24 Nov); a normal Grand Prix race writes 1 (rs1, 24 Nov).
+bool race_ruleset_ok(unsigned rs) { return rs == 1 || (rs >= 4 && rs <= 15); }
+constexpr uint8_t kGrandPrixRuleset = 1;
 std::atomic<bool> g_relaid{false};
 int g_grid_snaps = 0;
 
@@ -869,8 +875,14 @@ uint64_t hook_build_settings(void *mode, uint8_t *settings) {
             if (sid0 >= 15 && sid0 <= 17) ++g_bss_race;
             ilog("[instant-race] grid: BuildSessionSettings #%d of launch #%d (session id %u, ruleset %u)", n,
                  g_launch_no.load(), sid0, rs0);
-            if (sid0 >= 15 && sid0 <= 17 && !(rs0 == 1 || (rs0 >= 4 && rs0 <= 15)))
-                ilog("[instant-race] WARNING: race session with ruleset %u, which the game makes no race mode for", rs0);
+            if (sid0 >= 15 && sid0 <= 17) {
+                if (!race_ruleset_ok(rs0)) {
+                    settings[0] = kGrandPrixRuleset;
+                    ilog("[instant-race] Race session had ruleset %u, which the game makes no race for (crash as the "
+                         "race starts); set to %u (Grand Prix)", rs0, unsigned(kGrandPrixRuleset));
+                }
+                g_race_settings.store(settings);
+            }
         } else if (g_bss_idle_logged.fetch_add(1) < 12) {
             ilog("[instant-race] grid: BuildSessionSettings while no launch is running (session id %u, ruleset %u)", sid0, rs0);
         }
@@ -2295,6 +2307,20 @@ void on_flow_frame(double, void *) {
         }
     }
     int st = g_stage.load();
+    if (uint8_t *rs = g_race_settings.load()) {
+        // Keep the race's ruleset valid until the session is live: the game creates the race session from these
+        // settings about 15 s after building them, and a ruleset changed in between crashes it (F1_25.exe+0x2cf07f2).
+        if (st != static_cast<int>(LaunchStage::leave_frontend) && st != static_cast<int>(LaunchStage::loading_session)) {
+            g_race_settings.store(nullptr);
+        } else if (swofty::mem::readable(rs, 8)) {
+            uint32_t sid = *reinterpret_cast<uint32_t *>(rs + 4);
+            if (sid >= 15 && sid <= 17 && !race_ruleset_ok(rs[0])) {
+                ilog("[instant-race] Race session ruleset changed to %u while loading; set back to %u (Grand Prix)",
+                     unsigned(rs[0]), unsigned(kGrandPrixRuleset));
+                rs[0] = kGrandPrixRuleset;
+            }
+        }
+    }
     if (st == static_cast<int>(LaunchStage::leave_frontend) && GetTickCount64() - g_stage_ts > 60000) {
         ilog("[instant-race] Timeout waiting for the menu to close (60 s)");
         g_stage.store(static_cast<int>(LaunchStage::idle));
