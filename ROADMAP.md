@@ -232,6 +232,10 @@ StateUnloadSession (stall report: loader state 5, Sess_Module_OnSessionUnloaded,
 unload-ready), the same freeze as the broken first race. So never stop after the build. rc2 checks the weekend before
 anything changes (no weekend or 0 sessions = never set up; gp1 had none, good launches had 1) and keeps the 1.0.6
 relayout after the build (slot1/fuel4 had good relayout launches, so it is not always broken).
+rc2 (24 Nov 22:36-23:06): the stop came before any change (no Grand Prix save from it). Continuing the Grand Prix
+saved during the rc1 test froze on quitting again (that save carries rc1's half-built state); after deleting it, a
+new normal Grand Prix quit in 2 s, then Instant Race (2010 Jerez, 5 laps, 24 racers in order, none stacked at 5/20 s)
+quit in 3 s. Shipped as 1.0.7. Still open: a real test on a profile that has never started a Grand Prix.
  9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
 in so player reports show it.
