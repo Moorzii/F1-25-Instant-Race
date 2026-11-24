@@ -2449,7 +2449,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.6-wk1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.6-gp1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2735,6 +2735,82 @@ void on_paint_overlay(swofty::overlay::Paint *paint, void *) {
     ui::draw_toasts(u);
 }
 
+// gp1 test only: watch the weekend-building functions, both when Instant Race calls them and when the game's own
+// Grand Prix start does, logging their arguments and the current weekend's session count before and after.
+uint8_t *gp1_weekend() {
+    void *mgr = nullptr, *modes = nullptr;
+    if (!g_addrs.game_manager || !rd(reinterpret_cast<void *>(g_addrs.game_manager), 0, mgr) || !mgr ||
+        !rd(mgr, MANAGER_MODES, modes) || !modes)
+        return nullptr;
+    return current_weekend(modes);
+}
+std::atomic<int> g_gp1_calls{0};
+unsigned long long gp1_rva(const void *p) {
+    uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    return v >= 0x140000000ull && v < 0x160000000ull ? (unsigned long long)(v - 0x140000000ull) : 0ull;
+}
+const char *gp1_who() { return g_stage.load() == static_cast<int>(LaunchStage::idle) ? "game" : "instant-race"; }
+
+using GpRebuildFn = void(void *);
+GpRebuildFn *orig_gp_rebuild = nullptr;
+void gp1_rebuild(void *self) {
+    uint8_t *wk = gp1_weekend();
+    size_t before = wk ? weekend_session_count(wk) : 0;
+    void *vt = self && swofty::mem::readable(self, 8) ? *static_cast<void **>(self) : nullptr;
+    if (orig_gp_rebuild) orig_gp_rebuild(self);
+    uint8_t *wk2 = gp1_weekend();
+    if (++g_gp1_calls <= 200)
+        ilog("[instant-race] gp1: %s: RebuildFromRounds(this %p, vtable game+0x%llx): weekend %p %zu session(s) -> %p %zu",
+             gp1_who(), self, gp1_rva(vt), (void *)wk, before, (void *)wk2, wk2 ? weekend_session_count(wk2) : 0);
+}
+
+using GpLayoutFn = void(void *);
+GpLayoutFn *orig_gp_layout = nullptr;
+void gp1_layout(void *comp) {
+    uint8_t *wk = gp1_weekend();
+    size_t before = wk ? weekend_session_count(wk) : 0;
+    void *vt = comp && swofty::mem::readable(comp, 8) ? *static_cast<void **>(comp) : nullptr;
+    if (orig_gp_layout) orig_gp_layout(comp);
+    uint8_t *wk2 = gp1_weekend();
+    if (++g_gp1_calls <= 200) {
+        ilog("[instant-race] gp1: %s: LayoutWeekends(comp %p, vtable game+0x%llx): weekend %p %zu session(s) -> %p %zu",
+             gp1_who(), comp, gp1_rva(vt), (void *)wk, before, (void *)wk2, wk2 ? weekend_session_count(wk2) : 0);
+        if (g_stage.load() == static_cast<int>(LaunchStage::idle)) dump_weekend("after the game's LayoutWeekends", wk2);
+    }
+}
+
+using GpStructFn = void(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+GpStructFn *orig_gp_struct = nullptr;
+void gp1_struct(void *plan, void *gsm, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8,
+                uint64_t a9) {
+    if (++g_gp1_calls <= 200)
+        ilog("[instant-race] gp1: %s: DevWeekendStructure(plan %p, gsm %p, practice %llu, quali %llu, race %llu, race2 %llu, "
+             "%llu, %llu, %llu)", gp1_who(), plan, gsm, (unsigned long long)a3, (unsigned long long)a4,
+             (unsigned long long)a5, (unsigned long long)a6, (unsigned long long)a7, (unsigned long long)a8,
+             (unsigned long long)a9);
+    if (orig_gp_struct) orig_gp_struct(plan, gsm, a3, a4, a5, a6, a7, a8, a9);
+}
+
+using Pass4Fn = uint64_t(uint64_t, uint64_t, uint64_t, uint64_t);
+Pass4Fn *orig_gp_grid = nullptr;
+uint64_t gp1_grid(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    uint8_t *wk = gp1_weekend();
+    if (++g_gp1_calls <= 200)
+        ilog("[instant-race] gp1: %s: SetupStartingGrid(this %p, arg %p): weekend %p %zu session(s)", gp1_who(), (void *)a,
+             (void *)b, (void *)wk, wk ? weekend_session_count(wk) : 0);
+    return orig_gp_grid ? orig_gp_grid(a, b, c, d) : 0;
+}
+
+void gp1_wrap(const char *name, void *hook, void **orig) {
+    if (swofty::api->resolve(name) == 0) {
+        swofty::log("[instant-race] gp1: %s is not an exported binding", name);
+        return;
+    }
+    swofty::detail::append(swofty::detail::mixins,
+        new swofty::detail::node{{name, SWOFTY_MIXIN_WRAP, 0, hook, orig}, nullptr});
+    swofty::log("[instant-race] gp1: watching %s", name);
+}
+
 bool init_plugin() {
     if (!swofty::api || !swofty::api->resolve) return true;
 
@@ -2773,6 +2849,11 @@ bool init_plugin() {
                 nullptr});
     }
 
+    gp1_wrap("Game_CustomSeason_RebuildFromRounds", reinterpret_cast<void *>(&gp1_rebuild), reinterpret_cast<void **>(&orig_gp_rebuild));
+    gp1_wrap("Sess_WeekendSetup_LayoutWeekends", reinterpret_cast<void *>(&gp1_layout), reinterpret_cast<void **>(&orig_gp_layout));
+    gp1_wrap("Sess_Build_DevWeekendStructure", reinterpret_cast<void *>(&gp1_struct), reinterpret_cast<void **>(&orig_gp_struct));
+    gp1_wrap("Game_GridSetup_SetupStartingGrid", reinterpret_cast<void *>(&gp1_grid), reinterpret_cast<void **>(&orig_gp_grid));
+
     return true;
 }
 
@@ -2785,7 +2866,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.6-wk1 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.6-gp1 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
