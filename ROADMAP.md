@@ -226,6 +226,12 @@ Brad's profile can no longer show the bug, so the fix cannot be tested here. Sho
 gave race length 3 (5 laps), the game's build had 5, fuel fine, no compulsory stop (Brad drove the 5 laps).
 Correction: Racingfox's +0x2cf07f2 crashes are NOT this bug. His 1.0.6 crash (and the first 1.0.4 one) took no
 relayout: the weekend had its session. Cause unknown; ask the Swofty bot about fn 0x142cee9c0.
+rc1 (24 Nov 22:20-22:31): the guard stopped the launch after the season build. The Grand Prix menu then showed the
+stopped race as a saved Grand Prix; Brad deleted it, started a normal Grand Prix (race session), and quitting froze in
+StateUnloadSession (stall report: loader state 5, Sess_Module_OnSessionUnloaded, waiting for modules to answer
+unload-ready), the same freeze as the broken first race. So never stop after the build. rc2 checks the weekend before
+anything changes (no weekend or 0 sessions = never set up; gp1 had none, good launches had 1) and keeps the 1.0.6
+relayout after the build (slot1/fuel4 had good relayout launches, so it is not always broken).
  9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays
 in so player reports show it.
