@@ -1853,6 +1853,12 @@ uint64_t weekend_race_length(const RaceConfig &cfg) {
         if (full <= 0) full = kAddonFullLaps;
         share = float(cfg.laps) / float(full);
     }
+    if (share < 0.25f - 1e-3f && cfg.laps > 0) {
+        // Only the lap values the game's race rule tables have rows for (3, 5, 10 and 15 laps).
+        static const std::pair<int, uint64_t> kLapLengths[] = {{3, 2}, {5, 3}, {10, 8}, {15, 9}};
+        for (const auto &[laps, value] : kLapLengths)
+            if (cfg.laps <= laps) return value;
+    }
     return share <= 0.25f + 1e-3f ? 4 : share <= 0.35f + 1e-3f ? 5 : share <= 0.5f + 1e-3f ? 6 : 7;
 }
 
@@ -2154,8 +2160,10 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         ? registry_call(e, 0x10, reinterpret_cast<void *>(g_addrs.weekend_service), 1)
         : nullptr;
     uint64_t race_kind = race_length;
+    static const char *const kRaceLengthNames[] = {"none", "1 lap", "3 laps", "5 laps", "25%", "35%", "50%",
+                                                   "100%", "10 laps", "15 laps", "20 laps", "2 laps", "9 laps"};
     ilog("[instant-race] Weekend race length = %llu (%s)", (unsigned long long)race_kind,
-         race_kind == 4 ? "25%" : race_kind == 5 ? "35%" : race_kind == 6 ? "50%" : "100%");
+         race_kind < std::size(kRaceLengthNames) ? kRaceLengthNames[race_kind] : "?");
     if (!(alloc && cur_gsm && svc && g_addrs.weekend_structure && swofty::mem::readable(svc, 8))) {
         ilog("[instant-race] Weekend structure NOT built (alloc=%p gsm=%p svc=%p fn=%p)", alloc, cur_gsm, svc,
              (void *)g_addrs.weekend_structure);
@@ -2452,7 +2460,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.6-gp2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.6-gp3 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2922,7 +2930,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.6-gp2 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.6-gp3 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
