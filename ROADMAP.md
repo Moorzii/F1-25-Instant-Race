@@ -253,6 +253,15 @@ language either.
 - Team picks that don't exist in the chosen era's grid fall back to another car: limit the car list to the grid actually used (`sw_f1_<year>`). (HRT and Toro Rosso cases fixed in `next`.)
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.
 
+## Launcher updates checked
+- **24 Nov: up to 1.10.43** (Brad updated from 1.10.35 to 1.10.43 that evening). None of Instant Race's bindings changed
+  or went away. Useful: 1.10.40/1.10.43 write a load-stall report naming the step the game waits on when a session gets
+  stuck while unloading (after 60 s), which covers the first-race freeze on quit. 1.10.30 hands Melbourne's record to a
+  track data lookup by an unknown name (`[tracks] track data lookup guard:`), a different lookup from our track data set
+  crash. 1.10.39 fixed Continue on a Grand Prix save at Austria, Silverstone or Zandvoort Reverse with no track addon on
+  (closed the game on 1.10.30 to 1.10.38). 1.10.34/1.10.36 add live data (race lap count, fastest lap holder, pit window,
+  driver names) that could replace some of our grid diagnostics.
+
 ## Player reports to look at
 - **Tyre strategy and fuel (reported 20 Nov):** a player could not change their tyre strategy and their car was under-fuelled. Likely the race-only weekend / custom lap count not reaching the game's fuel and strategy setup. Need their instant_race.log, session folder, and the era/track/race length.
 - **EA version, likely fixed by 1.0.5:** the 1.0.4 byte pattern for g_Game_Manager probably found the wrong global on the
