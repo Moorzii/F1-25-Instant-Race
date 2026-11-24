@@ -193,6 +193,13 @@ says swofty_f1's race group grid_type is "qualifying" and grid_type_no_qualifyin
 a shuffled grid). So the 1.0.6 workaround ("quit and launch again") is wrong when the quit freezes. wk1 dumps the
 weekend (0x2a0 bytes) and its first session entry (0xa0) before and after the season build, after the entrants and
 after a relayout, to diff a kept weekend with a laid-out one.
+wk1 results (24 Nov 00:37-00:53): after Brad started one normal Grand Prix race from the game's menu (to the grid,
+then quit), every Instant Race had 1 session in the weekend BEFORE the season build, kept it (no relayout) and was
+good, including the first launch after restarting the game (00:52). So: the first-race bug happens when the Grand Prix
+save's weekend has never been set up by the game's own Grand Prix start; the game saves that weekend with the save, and
+Instant Race keeps it from then on. Workaround (in the README for players): start one normal Grand Prix, get to the
+grid, quit. Fix for 1.0.7: do what the game's Grand Prix start does to the weekend; next test logs the game's own
+Grand Prix start (wraps on Game_CustomSeason_RebuildFromRounds and Sess_WeekendSetup_LayoutWeekends with weekend dumps).
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays

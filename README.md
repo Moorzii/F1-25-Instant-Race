@@ -20,10 +20,11 @@ Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's ow
 
 ## Known limitations
 - **AI difficulty comes from your normal Grand Prix setting** (Grand Prix > Settings > Difficulty). The mod doesn't change it yet.
-- **The first Instant Race on a new Grand Prix save can start oddly** (after deleting your Grand Prix save, or on a
-  profile that has never run one): an empty Starting Grid screen, cars inside each other or in the wrong order, a lap
-  counted at the start and "fastest lap" messages. Quit to the menu and launch again: the next race is normal. A fix is
-  planned for 1.0.7.
+- **Instant Race needs one normal Grand Prix on your save first.** On a Grand Prix save the game has never set a race
+  up on (a new profile, or after deleting your Grand Prix save), Instant Race starts oddly: an empty Starting Grid
+  screen, cars inside each other or in the wrong order, a lap counted at the start, "fastest lap" messages, and the
+  game can freeze on the way back to the menu. Fix: start one normal Grand Prix from the game's Grand Prix menu, get
+  to the grid, then quit. Instant Race works from then on, also after restarting the game. A fix is planned for 1.0.7.
 - If the car you pick isn't on the selected era's grid, you'll be placed in another car on that grid.
 - Going back to the main menu after a race can take 1-3 minutes; that is the game unloading the race.
 - Add-on tracks can take several minutes to load (Laguna Seca about 7); the loading card says so. Leave it running.
