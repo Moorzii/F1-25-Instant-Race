@@ -200,6 +200,17 @@ save's weekend has never been set up by the game's own Grand Prix start; the gam
 Instant Race keeps it from then on. Workaround (in the README for players): start one normal Grand Prix, get to the
 grid, quit. Fix for 1.0.7: do what the game's Grand Prix start does to the weekend; next test logs the game's own
 Grand Prix start (wraps on Game_CustomSeason_RebuildFromRounds and Sess_WeekendSetup_LayoutWeekends with weekend dumps).
+gp1 results (24 Nov 01:14-01:19, fresh save): the game's own Grand Prix start never calls
+Game_CustomSeason_RebuildFromRounds or Sess_Build_DevWeekendStructure; it lays the weekend out with
+Sess_WeekendSetup_LayoutWeekends (same component, vtable game+0x567fc60) many times (clearing it to 0 sessions and laying
+it out again, last at 01:15:32), then Game_GridSetup_SetupStartingGrid (same this/arg as ours). Instant Race on a fresh
+save: no season or weekend exists before the build (current weekend null); RebuildFromRounds creates the 'custom_season'
+and a weekend with 0 sessions; our LayoutWeekends gives 1 session. The race session entries are the same apart from the
+entrant count (+0x28: 20 vs 22) and the race length byte (+0x90: 2 = 3 laps vs 4 = 25%). Yet the grid is in vehicle
+order and the phantom lap comes at 45 s. So the weekend is not the difference: the season is. A season RebuildFromRounds
+creates from nothing is never started (Game_Season_Start: season +0x538 0 NotStarted -> 1 InProgress, plus lists).
+gp2 logs the season's +0x538 at our build and at session live, and wraps Game_Season_Start and
+Game_CustomSeason_RefreshFromSetup to see what the game's Grand Prix start calls.
 
 Grid test 23 Nov (grid1, 9 Surprise launches back to back on Brad's PC): every grid good, BuildSessionSettings once per
 launch, never laid out again, no cars stacked. The grid problem does not reproduce on 1.0.5 here; grid logging stays

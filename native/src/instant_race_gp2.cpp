@@ -1235,6 +1235,7 @@ bool complete_load_sync(uint8_t *state) {
 // Make the weekend's first session the Race (what direct_start.cpp's choose_session does).
 // The weekend structure itself is already built once, earlier, in build_grand_prix_weekend().
 uint8_t *current_weekend(void *modes);
+void gp1_season_log(const char *when);
 void choose_race_session() {
     if (!g_addrs.game_manager) return;
     void *mgr = nullptr;
@@ -1395,6 +1396,7 @@ extern "C" uint32_t __fastcall on_flow_link_check(uint8_t *state, uint32_t link)
             g_raced_once = true;
             clear_menu_exit_latches();
             ilog("[instant-race] Session active! Handover complete.");
+            gp1_season_log("when the Instant Race session went live");
             ilog("[instant-race] grid: launch #%d reached the session: BuildSessionSettings %d call(s), %d for a race "
                  "session; weekend laid out again: %s", g_launch_no.load(), g_bss_calls.load(), g_bss_race.load(),
                  g_relaid.load() ? "yes" : "no");
@@ -2127,6 +2129,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     hand_plan("before the season build");
     reinterpret_cast<void (*)(void *)>(g_addrs.build_season)(stub);
     dump_weekend("after the season build", current_weekend(modes));
+    gp1_season_log("after Instant Race's season build");
     {
         uint8_t *gp_mode = nullptr, *cur_mode = nullptr;
         rd(e, ENTITY_MODE, gp_mode);
@@ -2449,7 +2452,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.6-gp1 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.6-gp2 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2749,6 +2752,34 @@ unsigned long long gp1_rva(const void *p) {
     uintptr_t v = reinterpret_cast<uintptr_t>(p);
     return v >= 0x140000000ull && v < 0x160000000ull ? (unsigned long long)(v - 0x140000000ull) : 0ull;
 }
+// The current season (the chain current_weekend reads: [modes+0x88]+0x260 -> +0x1058 champ -> +0x548 list [+0x560]
+// +8) and its started flag +0x538 (Game_Season_Start: 0 NotStarted -> 1 InProgress).
+uint8_t *gp1_season() {
+    void *mgr = nullptr, *modes = nullptr;
+    uint8_t *holder = nullptr, *entity = nullptr, *champ = nullptr, *sb = nullptr, *se = nullptr, *season = nullptr;
+    uint32_t si = 0;
+    if (!g_addrs.game_manager || !rd(reinterpret_cast<void *>(g_addrs.game_manager), 0, mgr) || !mgr ||
+        !rd(mgr, MANAGER_MODES, modes) || !modes || !rd(modes, 0x88, holder) || !rd(holder, 0x260, entity) ||
+        !rd(entity, 0x1058, champ) || !rd(champ, 0x548, sb) || !rd(champ, 0x550, se) || !rd(champ, 0x560, si) ||
+        se <= sb || si >= size_t(se - sb) / 16 || !rd(sb, size_t(si) * 16 + 8, season) ||
+        !swofty::mem::readable(season, 0x540))
+        return nullptr;
+    return season;
+}
+void gp1_season_log(const char *when) {
+    uint8_t *season = gp1_season();
+    uint32_t started = 0, wi = 0;
+    uint8_t **wb = nullptr, **we = nullptr;
+    if (season) {
+        rd(season, 0x538, started);
+        rd(season, 0x288, wb);
+        rd(season, 0x290, we);
+        rd(season, 0x2a0, wi);
+    }
+    void *vt = season ? *reinterpret_cast<void **>(season) : nullptr;
+    ilog("[instant-race] gp2: season %s: %p (vtable game+0x%llx), +0x538 %u, %zu weekend(s), current %u", when,
+         (void *)season, gp1_rva(vt), started, (wb && we > wb) ? size_t(we - wb) : 0, wi);
+}
 const char *gp1_who() { return g_stage.load() == static_cast<int>(LaunchStage::idle) ? "game" : "instant-race"; }
 
 using GpRebuildFn = void(void *);
@@ -2799,6 +2830,29 @@ uint64_t gp1_grid(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
         ilog("[instant-race] gp1: %s: SetupStartingGrid(this %p, arg %p): weekend %p %zu session(s)", gp1_who(), (void *)a,
              (void *)b, (void *)wk, wk ? weekend_session_count(wk) : 0);
     return orig_gp_grid ? orig_gp_grid(a, b, c, d) : 0;
+}
+
+using GpSeasonStartFn = uint64_t(void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+GpSeasonStartFn *orig_gp_season_start = nullptr;
+uint64_t gp1_season_start(void *self, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    uint32_t f_before = 0;
+    if (self && swofty::mem::readable(self, 0x540)) rd(self, 0x538, f_before);
+    gp1_season_log("before Season::start");
+    uint64_t r = orig_gp_season_start ? orig_gp_season_start(self, a2, a3, a4, a5, a6) : 0;
+    if (++g_gp1_calls <= 200)
+        ilog("[instant-race] gp2: %s: Season::start(this %p (+0x538 was %u), %p, %p, %p, %p) -> %llu", gp1_who(), self,
+             f_before, (void *)a2, (void *)a3, (void *)a4, (void *)a5, (unsigned long long)r);
+    gp1_season_log("after Season::start");
+    return r;
+}
+Pass4Fn *orig_gp_refresh = nullptr;
+uint64_t gp1_refresh(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    gp1_season_log("before RefreshFromSetup");
+    uint64_t r = orig_gp_refresh ? orig_gp_refresh(a, b, c, d) : 0;
+    if (++g_gp1_calls <= 200)
+        ilog("[instant-race] gp2: %s: CustomSeason_RefreshFromSetup(this %p)", gp1_who(), (void *)a);
+    gp1_season_log("after RefreshFromSetup");
+    return r;
 }
 
 void gp1_wrap(const char *name, void *hook, void **orig) {
@@ -2852,6 +2906,8 @@ bool init_plugin() {
     gp1_wrap("Game_CustomSeason_RebuildFromRounds", reinterpret_cast<void *>(&gp1_rebuild), reinterpret_cast<void **>(&orig_gp_rebuild));
     gp1_wrap("Sess_WeekendSetup_LayoutWeekends", reinterpret_cast<void *>(&gp1_layout), reinterpret_cast<void **>(&orig_gp_layout));
     gp1_wrap("Sess_Build_DevWeekendStructure", reinterpret_cast<void *>(&gp1_struct), reinterpret_cast<void **>(&orig_gp_struct));
+    gp1_wrap("Game_Season_Start", reinterpret_cast<void *>(&gp1_season_start), reinterpret_cast<void **>(&orig_gp_season_start));
+    gp1_wrap("Game_CustomSeason_RefreshFromSetup", reinterpret_cast<void *>(&gp1_refresh), reinterpret_cast<void **>(&orig_gp_refresh));
     gp1_wrap("Game_GridSetup_SetupStartingGrid", reinterpret_cast<void *>(&gp1_grid), reinterpret_cast<void **>(&orig_gp_grid));
 
     return true;
@@ -2866,7 +2922,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.6-gp1 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.6-gp2 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
