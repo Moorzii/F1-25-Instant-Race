@@ -285,6 +285,12 @@ language either.
 - **Crash attributed to Instant Race (report-05, 21 Nov):** access violation at F1_25.exe+0xaf76f1 inside the game's
   own Game_ChampionshipGameMode_BuildSessionSettings during a normal Grand Prix; Instant Race's wrap was only passing
   through (no launch that session), but crash reports name instant_race.dll because the wrap is on the stack.
+- **Swofty bot on +0x2cf07f2 (24 Nov 22:23):** 0x142cee9c0 is the game's create-session function (vtable slot 8 of a
+  session object, called from Sess_Loader_Update); it picks game/flow_race.xml etc. from the session settings and stores
+  a mode object at this+0xf0. The crash is `mov rcx,[this+0xf0]` = null: the settings type at [[this+0x220]+0x1a8] hit
+  none of its branches (inferred), or the allocation failed. 4 reports at this site, all with Instant Race on, 0
+  without. Next: ask which settings field feeds [[this+0x220]+0x1a8] and its valid values, then log it in our
+  BuildSessionSettings wrap on every launch (and correct it if it is out of range).
 - **Short races now ask for a pit stop (Racingfox2309, 24 Nov, 1.0.6):** "the game doesn't detect 5 lappers anymore, I
   have to make a pit stop". 1.0.6's fuel fix sends 25% as the weekend race length for anything up to 25%, and 25% brings
   the 25% race rules (compulsory stop with two dry compounds; game setup mode tyre_regulations.race0_length_requirement).
