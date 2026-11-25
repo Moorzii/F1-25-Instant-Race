@@ -272,6 +272,10 @@ language either.
 - Release the weekend-structure list entries after handing them to the service (Swofty's direct start does this); currently a small leak per launch.
 
 ## Launcher updates checked
+- **25 Nov: up to 1.10.53** (Brad on 1.10.44). No binding changes. Nothing that touches Grand Prix setup, track data
+  or the session flow Instant Race uses. 1.10.45 names the track worlds an unload waits on (the 2011 freeze), and Send
+  Logs keeps crash reports and dumps. 1.10.53 explains "a crash as a session ends" in Send Logs and logs the model part
+  pool at session load.
 - **24 Nov: up to 1.10.43** (Brad updated from 1.10.35 to 1.10.43 that evening). None of Instant Race's bindings changed
   or went away. Useful: 1.10.40/1.10.43 write a load-stall report naming the step the game waits on when a session gets
   stuck while unloading (after 60 s), which covers the first-race freeze on quit. 1.10.30 hands Melbourne's record to a
