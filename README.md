@@ -31,6 +31,9 @@ Needs Swofty Launcher 1.10.29 or newer: Instant Race uses only the launcher's ow
 - Game updates can stop the mod working until it's updated.
 
 ## Changelog
+**1.0.8**
+- **First race after a Grand Prix with qualifying:** if your last normal Grand Prix weekend had more than the race (qualifying, say), Instant Race could start that session instead: the race ended straight away, the next session started with the chequered flag, and the game could crash. Instant Race now always sets the weekend up as a single race.
+
 **1.0.7**
 - **Short races:** races shorter than a quarter of the real distance (a 5-lap race, say) no longer ask for a compulsory
   pit stop. Since 1.0.6 the game treated every race up to 25% as a 25% race, with its two-compound pit stop rule. Fuel

@@ -335,6 +335,13 @@ language either.
   session ids before and after the build, and lay the weekend out again from our race-only plan whenever it is not
   exactly one race (was: only when it had 0 sessions). Test: a normal Grand Prix with qualifying + race to the grid,
   quit, then F7.
+- **wk2 confirmed (25 Nov 22:26-22:40, Brad):** a normal Grand Prix with qualifying (its build: session id 9, ruleset
+  0), quit from qualifying, then F7: weekend before the build "2 session(s) (ids 9,15)", after the build still 9,15,
+  laid out again -> 1 session (15); BuildSessionSettings got session 15, ruleset 1, the game's build had our 5 laps;
+  20 racers in order, normal race, quit in 6 s. Shipped in 1.0.8. The bot (25 Nov 22:28): LayoutWeekends lays every
+  weekend of the season out from the component's current weekend options (comp vtable +0x280); a weekend still on
+  session 0 and unfinished gets a full replace (sessions destroyed, Weekend::start runs); one past session 0 keeps its
+  started sessions.
 - **Racingfox never plays Time Trial (25 Nov):** so a stale Time Trial ruleset (2) is ruled out. Left: a ruleset that
   is fine at our build and changes before the race is created (1.0.7 corrects it and logs "Race session ruleset changed
   to ..."), a different SessionSettings copy than the one our wrap sees, or the mode allocation failing. If he crashes

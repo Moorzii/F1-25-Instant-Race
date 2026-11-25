@@ -2516,7 +2516,7 @@ void trigger_launch() {
     g_last_fade_mask = ~0u;
     g_last_fade_state = ~0u;
     g_fade_log_count = 0;
-    ilog("[instant-race] v1.0.7 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
+    ilog("[instant-race] v1.0.8 Launch triggered: era=%s track=%s team=%s driver=%s laps=%.0f weather=%s time=%s surprise=%d", g_cfg.era_id.c_str(), g_cfg.track_id.c_str(), g_cfg.team_id.c_str(), g_cfg.driver_id.c_str(), g_cfg.laps, g_cfg.weather.c_str(), time_of_day_label(g_cfg.time_of_day), g_cfg.surprise ? 1 : 0);
     g_stage.store(static_cast<int>(LaunchStage::set_mode));
     swofty::overlay::ui::toast(g_ui_state, "Launching Instant Race at " + g_cfg.track_label + "...");
 }
@@ -2852,7 +2852,7 @@ SWOFTY_ON_LOAD {
     if (swofty::overlay::available()) {
         swofty::overlay::on_paint(&on_paint_overlay);
     }
-    swofty::log("[instant-race] v1.0.7 loaded! Press F7 on the main menu to open Instant Race.");
+    swofty::log("[instant-race] v1.0.8 loaded! Press F7 on the main menu to open Instant Race.");
 }
 
 SWOFTY_ADDON(init_plugin)
