@@ -318,6 +318,19 @@ language either.
   Sess_Module_OnSessionUnloaded). Same as grid2's two 2011 launches (18 of 24 racers, freeze) and the normal Grand Prix
   Brad started in the rc1 test, which had a 2011 grid and froze on quitting twice without Instant Race in it. So the
   2011 season freezes on quitting in a normal Grand Prix too: not an Instant Race bug. Asked the Swofty bot.
+- **Swofty report 25 Nov 20:22/20:27 (another player, 1.0.7, launcher 1.10.52, 2022 grid):** the profile's Grand Prix
+  weekend had 2 sessions before the build. Our BuildSessionSettings got session id 15 with ruleset 0 and 99 laps (Brad's
+  always ruleset 1 and our race length); 1.0.7 set the ruleset to 1, so no +0x2cf07f2 crash, but the race session ended
+  312 ms after going live, a second StateSession started with the chequered flag at lap 0 (3 more builds, ruleset 1),
+  and the game crashed (F1_25.exe+0x150cd5a 25 s after handover; the 20:22 run at +0x3789029 0.7 s after).
+  Cause (from the code and gp3's dumps): the season build keeps the weekend the profile already has. Brad's last Grand
+  Prix was race only (1 session, so it worked); this player's had 2 (qualifying + race, or a sprint). We silently set
+  session[0]'s id to 15 when it was not a race, so the game built qualifying's settings for our race and then played
+  the real race session after it. That also fits Racingfox's crashes (first Instant Race after a normal Grand Prix with
+  qualifying; later launches use the weekend our first launch left). Fix in `next` (wk2 test): log the weekend's
+  session ids before and after the build, and lay the weekend out again from our race-only plan whenever it is not
+  exactly one race (was: only when it had 0 sessions). Test: a normal Grand Prix with qualifying + race to the grid,
+  quit, then F7.
 - **Racingfox never plays Time Trial (25 Nov):** so a stale Time Trial ruleset (2) is ruled out. Left: a ruleset that
   is fine at our build and changes before the race is created (1.0.7 corrects it and logs "Race session ruleset changed
   to ..."), a different SessionSettings copy than the one our wrap sees, or the mode allocation failing. If he crashes

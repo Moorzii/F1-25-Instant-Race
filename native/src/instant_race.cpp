@@ -1487,6 +1487,27 @@ size_t weekend_session_count(uint8_t *wk) {
     return size_t(en - b) / 0xa0;
 }
 
+// The session ids of a weekend, as "15" or "10,15" (session entries 0xa0 apart, id at +8).
+std::string weekend_session_ids(uint8_t *wk) {
+    std::string out;
+    uint8_t *b = nullptr, *en = nullptr;
+    if (!wk || !rd(wk, WK_SESSIONS, b) || !rd(wk, WK_SESSIONS + 8, en) || !b || en <= b) return out;
+    for (uint8_t *p = b; p < en && size_t(p - b) < 16 * 0xa0; p += 0xa0) {
+        uint32_t id = 0;
+        if (!rd(p, SESSION_ID, id)) break;
+        if (!out.empty()) out += ',';
+        out += std::to_string(id);
+    }
+    return out;
+}
+
+bool weekend_is_one_race(uint8_t *wk) {
+    if (weekend_session_count(wk) != 1) return false;
+    uint8_t *b = nullptr;
+    uint32_t id = 0;
+    return rd(wk, WK_SESSIONS, b) && b && rd(b, SESSION_ID, id) && id >= 15 && id <= 17;
+}
+
 void seat_player_on_grid(uint8_t *e, void *mgr, const std::string &want_team, const std::string &want_driver) {
     auto **begin = reinterpret_cast<uint8_t **>(e + ENTITY_ENTRANTS);
     if (!begin[0] || !begin[1] || begin[1] <= begin[0]) return;
@@ -1926,7 +1947,8 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             g_stage.store(static_cast<int>(LaunchStage::idle));
             return false;
         }
-        ilog("[instant-race] Grand Prix weekend on this profile: %zu session(s) before the build", n0);
+        ilog("[instant-race] Grand Prix weekend on this profile: %zu session(s) before the build (ids %s)", n0,
+             weekend_session_ids(wk0).c_str());
     }
 
     uint8_t *es = *reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(mgr) + MANAGER_ENTRANTS);
@@ -2200,11 +2222,18 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
     seat_player_on_grid(e, mgr, cfg.team_id, cfg.driver_id);
 
     wk = current_weekend(modes);
-    if (wk && weekend_session_count(wk) == 0) {
-        // A Grand Prix weekend already in the mode that was never played (a profile with no Grand Prix played) is
-        // reset by the season build: its sessions are cleared and nothing lays them out again, so the race would
-        // have no session (phantom first lap, fastest-lap spam). Lay the season's weekends out from the weekend
-        // service's plan, as the game's weekend setup does (Sess_WeekendSetup_LayoutWeekends).
+    if (wk) ilog("[instant-race] Weekend after the build: %zu session(s) (ids %s)", weekend_session_count(wk),
+                 weekend_session_ids(wk).c_str());
+    if (wk && !weekend_is_one_race(wk)) {
+        // The season build keeps the weekend the profile already has. Its sessions must be exactly one race:
+        // - none (a weekend that was never played): the race has no session (phantom first lap, fastest-lap spam);
+        // - more than one, or not a race (the player's last Grand Prix had qualifying, a sprint, ...): session 0 is
+        //   qualifying or practice, so the game builds that session's settings (ruleset 0, 99 laps) for our race;
+        //   once the race mode is made, it ends at once and the next session starts with the chequered flag, then
+        //   the game crashes (Swofty report 25 Nov, 1.0.7: F1_25.exe+0x150cd5a / +0x3789029; without the 1.0.7
+        //   ruleset check, at the race flow start, F1_25.exe+0x2cf07f2).
+        // Lay the season's weekends out from the weekend service's plan (race only), as the game's weekend setup does
+        // (Sess_WeekendSetup_LayoutWeekends).
         static uintptr_t layout = 0;
         if (!layout) layout = bind_name("Sess_WeekendSetup_LayoutWeekends");
         uint8_t *lsvc = g_addrs.weekend_service
@@ -2219,10 +2248,11 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
             reinterpret_cast<void (*)(void *)>(layout)(lsvc);
             wk = current_weekend(modes);
             g_relaid.store(true);
-            ilog("[instant-race] The weekend had no sessions after the build; laid out again: %zu session(s)",
-                 weekend_session_count(wk));
+            ilog("[instant-race] The weekend was not one race after the build; laid out again: %zu session(s) (ids %s)%s",
+                 weekend_session_count(wk), weekend_session_ids(wk).c_str(),
+                 weekend_is_one_race(wk) ? "" : " - STILL NOT ONE RACE");
         } else {
-            ilog("[instant-race] The weekend has no sessions and could not be laid out (layout %p, service %p, entity %p)",
+            ilog("[instant-race] The weekend is not one race and could not be laid out (layout %p, service %p, entity %p)",
                  (void *)layout, lsvc, svc_ent);
         }
     }
@@ -2234,6 +2264,7 @@ bool build_grand_prix_weekend(const RaceConfig &cfg) {
         if (rd(wk, WK_SESSIONS, sb) && rd(wk, WK_SESSIONS + 8, se) && sb && se > sb && swofty::mem::readable(sb, SESSION_ID + 4)) {
             uint32_t cur_sid = *reinterpret_cast<uint32_t *>(sb + SESSION_ID);
             if (cur_sid < 15 || cur_sid > 17) {
+                ilog("[instant-race] Weekend session[0] was id %u, not a race; set to 15", cur_sid);
                 *reinterpret_cast<uint32_t *>(sb + SESSION_ID) = 15;
             }
             ilog("[instant-race] Weekend session[0] id=%u (track_stat_id=%u)",
