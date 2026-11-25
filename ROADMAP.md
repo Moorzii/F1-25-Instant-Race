@@ -318,6 +318,10 @@ language either.
   Sess_Module_OnSessionUnloaded). Same as grid2's two 2011 launches (18 of 24 racers, freeze) and the normal Grand Prix
   Brad started in the rc1 test, which had a 2011 grid and froze on quitting twice without Instant Race in it. So the
   2011 season freezes on quitting in a normal Grand Prix too: not an Instant Race bug. Asked the Swofty bot.
+- **Racingfox never plays Time Trial (25 Nov):** so a stale Time Trial ruleset (2) is ruled out. Left: a ruleset that
+  is fine at our build and changes before the race is created (1.0.7 corrects it and logs "Race session ruleset changed
+  to ..."), a different SessionSettings copy than the one our wrap sees, or the mode allocation failing. If he crashes
+  on 1.0.7: ruleset 1 at the build and no "changed" line means the 1.0.7 check did not reach the cause; ask the bot.
 - **Short races now ask for a pit stop (Racingfox2309, 24 Nov, 1.0.6):** "the game doesn't detect 5 lappers anymore, I
   have to make a pit stop". 1.0.6's fuel fix sends 25% as the weekend race length for anything up to 25%, and 25% brings
   the 25% race rules (compulsory stop with two dry compounds; game setup mode tyre_regulations.race0_length_requirement).
